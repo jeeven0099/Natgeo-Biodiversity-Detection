@@ -1,0 +1,35 @@
+label_raw,coarse,fine,rank,keep,notes
+Bird,bird,unspecified_bird,unspecified,1,Generic bird tag; coarse head only
+3 birds,bird,unspecified_bird,unspecified,1,Multiple overlapping birds; coarse head only
+Banded Woodpecker,bird,banded_woodpecker,species,1,
+Brown Boobook,bird,brown_boobook,species,1,
+Changeable Hawk-Eagle,bird,changeable_hawk_eagle,species,1,
+Collared Scops Owl,bird,collared_scops_owl,species,1,
+Common Flameback,bird,common_flameback,species,1,
+Greater Flameback,bird,greater_flameback,species,1,
+Common Hill Myna,bird,common_hill_myna,species,1,
+Crow,bird,crow,genus,1,House or Large-billed Crow not distinguished
+Greater Racket-tailed Drongo,bird,greater_racket_tailed_drongo,species,1,
+Long-tailed Parakeet,bird,long_tailed_parakeet,species,1,
+Orange-bellied Flowerpecker,bird,orange_bellied_flowerpecker,species,1,
+Pin-striped Tit-Babbler,bird,pin_striped_tit_babbler,species,1,
+Red-crowned Barbet,bird,red_crowned_barbet,species,1,
+Red-legged Crake,bird,red_legged_crake,species,1,
+Short-tailed Babbler,bird,short_tailed_babbler,species,1,
+Square-tailed Drongo-Cuckoo,bird,square_tailed_drongo_cuckoo,species,1,
+Insect,insect,unspecified_insect,unspecified,1,Generic insect tag; coarse head only
+Cicada,insect,cicada_unspecified,family,1,Cicadidae not resolved to species
+Chremistica pontianaka,insect,chremistica_pontianaka,species,1,Cicada
+Purana ubina,insect,purana_ubina,species,1,Cicada
+Orthoptera,insect,orthoptera,order,1,Crickets and katydids
+Frog,amphibian,frog_unspecified,unspecified,1,Anura not resolved
+Raffles_ Banded Langur,mammal,raffles_banded_langur,species,1,Critically endangered; folder name mangles apostrophe
+Aircraft,anthropogenic,aircraft,nonbiotic,1,
+Helicopter,anthropogenic,helicopter,nonbiotic,1,
+Gunfire,anthropogenic,gunfire,nonbiotic,1,Live-firing area nearby
+Siren,anthropogenic,siren,nonbiotic,1,
+Human Voice,anthropogenic,human_voice,nonbiotic,1,
+Thunder,geophony,thunder,nonbiotic,1,
+Wind,geophony,wind,nonbiotic,1,
+Unknown,unknown,unknown,none,0,Excluded from training
+Unsure ID,unknown,unsure_id,none,0,Annotator flagged uncertain; excluded from training

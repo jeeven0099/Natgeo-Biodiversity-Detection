@@ -1,0 +1,18 @@
+# Cluster environment for the Perch 2.0 extraction stage.
+#   conda env create -f environment.yml && conda activate natgeo-perch
+#
+# libsndfile comes from conda because the pip soundfile wheel does not always
+# find a system copy on HPC nodes. Everything else is pip: perch-hoplite is not
+# on conda-forge, and [tf-cuda] pins the TF build its SavedModels expect.
+name: natgeo-perch
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - libsndfile
+  - pip
+  - pip:
+      - perch-hoplite[tf-cuda]
+      - soundfile
+      - scipy
+      - scikit-learn

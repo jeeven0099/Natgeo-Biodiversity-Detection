@@ -1,0 +1,29 @@
+# Local GPU extraction on Windows, where TensorFlow has no native GPU support
+# after 2.10 and Perch's SavedModel needs 2.20. ONNX Runtime is the way in.
+#
+#   python -m venv .venv-perch
+#   .venv-perch/Scripts/python -m pip install --upgrade \
+#       --trusted-host pypi.org --trusted-host files.pythonhosted.org pip
+#   .venv-perch/Scripts/pip install -r requirements-gpu.txt
+#
+# The pip bootstrap is not optional on this network; see README, "TLS
+# interception".
+perch-hoplite
+soundfile
+scipy
+scikit-learn
+
+# Pinned, not floating: 1.30 links against CUDA 13 (cublasLt64_13.dll) while
+# driver 576.28 provides at most 12.9. The mismatch does not raise - the CUDA
+# provider is just never created and everything runs on CPU at a third of the
+# speed.
+onnxruntime-gpu==1.22.0
+
+# The CUDA runtime itself, as wheels, so no system CUDA install is needed.
+# extract_perch.add_nvidia_dll_dirs() puts these on PATH and in the DLL search
+# path, both of which cuDNN 9 needs.
+nvidia-cuda-runtime-cu12
+nvidia-cudnn-cu12
+nvidia-cublas-cu12
+nvidia-cufft-cu12
+nvidia-curand-cu12

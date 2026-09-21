@@ -1,0 +1,32 @@
+fine,strategy,query,positives,notes
+collared_scops_owl,species,Otus lettia;Otus lempiji;Collared Scops-Owl;Sunda Scops Owl,fine:collared_scops_owl,CHECK: Singapore's resident scops owl is usually Sunda Scops Owl (O. lempiji); the annotation may be a misidentification. Both queried deliberately.
+brown_boobook,species,Ninox scutulata;Brown Boobook;Brown Hawk-Owl,fine:brown_boobook,
+red_legged_crake,species,Rallina fasciata;Red-legged Crake,fine:red_legged_crake,
+pin_striped_tit_babbler,species,Mixornis gularis;Macronus gularis;Pin-striped Tit-Babbler,fine:pin_striped_tit_babbler,Genus moved from Macronus to Mixornis; both queried
+greater_racket_tailed_drongo,species,Dicrurus paradiseus;Greater Racket-tailed Drongo,fine:greater_racket_tailed_drongo,
+banded_woodpecker,species,Chrysophlegma miniaceum;Picus miniaceus;Banded Woodpecker,fine:banded_woodpecker,Genus moved from Picus to Chrysophlegma
+red_crowned_barbet,species,Psilopogon rafflesii;Megalaima rafflesii;Red-crowned Barbet,fine:red_crowned_barbet,Genus moved from Megalaima to Psilopogon
+short_tailed_babbler,species,Pellorneum malaccense;Malacocincla malaccensis;Short-tailed Babbler,fine:short_tailed_babbler,
+orange_bellied_flowerpecker,species,Dicaeum trigonostigma;Orange-bellied Flowerpecker,fine:orange_bellied_flowerpecker,
+changeable_hawk_eagle,species,Nisaetus cirrhatus;Spizaetus cirrhatus;Changeable Hawk-Eagle,fine:changeable_hawk_eagle,
+common_hill_myna,species,Gracula religiosa;Common Hill Myna,fine:common_hill_myna,
+long_tailed_parakeet,species,Psittacula longicauda;Belocercus longicaudus;Long-tailed Parakeet,fine:long_tailed_parakeet,
+square_tailed_drongo_cuckoo,species,Surniculus lugubris;Square-tailed Drongo-Cuckoo,fine:square_tailed_drongo_cuckoo,
+common_flameback,species,Dinopium javanense;Common Flameback,fine:common_flameback,
+greater_flameback,species,Chrysocolaptes guttacristatus;Chrysocolaptes lucidus;Greater Flameback,fine:greater_flameback,
+crow,species,Corvus splendens;Corvus macrorhynchos;House Crow;Large-billed Crow,fine:crow,Annotation does not distinguish the two Singapore crows
+raffles_banded_langur,species,Presbytis femoralis;Raffles' Banded Langur;Banded Surili,fine:raffles_banded_langur,Critically endangered; unlikely to be in Perch's label set
+purana_ubina,species,Purana ubina;genus:Purana,fine:purana_ubina,"GENUS FALLBACK: P. ubina is absent from Perch; the 3 congeners present (gigas, khaosokensis, usnani) stand in. Treat a hit as Purana sp., not as a species ID."
+chremistica_pontianaka,species,Chremistica pontianaka,fine:chremistica_pontianaka,Cicada; unlikely to be in Perch's label set
+aircraft,sound_event,Aircraft;Fixed-wing_aircraft_and_airplane;airplane,fine:aircraft,FSD50K/AudioSet non-species class
+helicopter,sound_event,Aircraft;Engine,fine:helicopter,"NO HELICOPTER CLASS in FSD50K's vocabulary. Falls back to the parent Aircraft class, which cannot separate rotary from fixed-wing, so this target and aircraft are near-duplicates by construction."
+gunfire,sound_event,Gunshot_and_gunfire;gunshot;gunfire,fine:gunfire,FSD50K/AudioSet non-species class
+siren,sound_event,Siren;Emergency_vehicle,fine:siren,FSD50K/AudioSet non-species class
+human_voice,sound_event,Speech;Human_voice,fine:human_voice,FSD50K/AudioSet non-species class
+thunder,sound_event,Thunder;Thunderstorm,fine:thunder,FSD50K/AudioSet non-species class
+wind,sound_event,Wind;Wind_noise_microphone,fine:wind,FSD50K/AudioSet non-species class
+unspecified_bird,aggregate,ebird:any;class=Aves,coarse:bird,"Max over all 10222 Aves classes. Birds are identified exactly from the model's own eBird code array, widened with GBIF for the few birds lacking a 2021 code."
+unspecified_insect,aggregate,Insect;class=Insecta,coarse:insect,FSD50K Insect class unioned with every Insecta species in the label set.
+orthoptera,aggregate,Cricket;order=Orthoptera,fine:orthoptera,FSD50K Cricket class unioned with every Orthoptera species.
+cicada_unspecified,aggregate,family=Cicadidae,"fine:cicada_unspecified,purana_ubina,chremistica_pontianaka",No FSD50K cicada class; expands to every Cicadidae species in the label set.
+frog_unspecified,aggregate,Frog;order=Anura,fine:frog_unspecified,FSD50K Frog class unioned with every Anura species.

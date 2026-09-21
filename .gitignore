@@ -1,0 +1,16 @@
+# Source audio: 13 GB across seven Google Drive download splits, and the
+# weather export. These are inputs, not artefacts - they live in Drive, and
+# data/manifest.csv references them in place rather than copying them.
+Labelled Data-*/
+Weather Data */
+*.zip
+__MACOSX/
+
+# Extraction cache: embeddings and logits are reproducible from stage 4.
+data/perch*/
+
+# Environment
+.venv-perch/
+.cache/
+__pycache__/
+*.pyc

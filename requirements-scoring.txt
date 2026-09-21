@@ -1,0 +1,3 @@
+# Scoring only: reads the cache extract_perch.py leaves behind. No TF, no GPU.
+numpy
+scikit-learn
