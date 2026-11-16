@@ -1,12 +1,47 @@
-# Audio biodiversity survey — Perch 2.0 pipeline
+# Natgeo Biodiversity Detection
 
-Detecting animal species by sound in a single Singapore study area, to assess
-the biodiversity there. The corpus is 4,684 labelled clips from one recorder
-(S01634) over 7 days, filed one folder per class.
+[![CI](https://github.com/jeeven0099/Natgeo-Biodiversity-Detection/actions/workflows/ci.yml/badge.svg)](https://github.com/jeeven0099/Natgeo-Biodiversity-Detection/actions/workflows/ci.yml)
 
-The pipeline caches Perch 2.0 embeddings and logits once, then scores against
-our own labels. Everything after extraction needs only numpy and scikit-learn,
-so the expensive stage runs once and analysis iterates cheaply.
+Detecting animal species by sound in a single Singapore study area, to assess the biodiversity
+there. It was built in a National Geographic × NUS capstone project. The corpus is one recorder
+(S01634) over 7 days: 134 long-form recordings, plus 4,684 labelled clips filed one folder per
+class.
+
+The repository has two parts:
+
+| Part | Where | What it does |
+|---|---|---|
+| **Perch 2.0 zero-shot survey** (this page) | `scripts/`, `config/`, `notebooks/perch_zeroshot_viewer.ipynb` | Scores every 5 s window of the long recordings for birds, frogs, insects, mammals and human sounds with Perch 2.0 and EarthChirp. Turns the scores into time-frequency boxes. Lets a person review each box in a local web app. |
+| **`biodetect` package** ([BIODETECT.md](BIODETECT.md)) | `src/biodetect/`, `tests/`, `examples/`, `notebooks/0*_*.ipynb` | A label-free implementation of Guerrero et al. (2023): Otsu boxes and LAMDA clustering. It is pip-installable and tested in CI. |
+
+The pipeline caches Perch 2.0 embeddings and logits once, then scores against our own labels.
+Everything after extraction needs only numpy and scikit-learn, so the expensive stage runs once and
+analysis iterates cheaply.
+
+### The review platform at a glance
+
+![Review app: a logged Aves box with its spectrogram, Perch's top 5 and the reviewer's decision](docs/figures/review_app_logged.png)
+
+*`scripts/review_app.py` on one Aves box. Left: every zero-shot box in the recording; ✓ marks a
+logged box. Centre: the spectrogram, with Raven boxes (blue dashed), the cells Perch used (shaded)
+and the accepted box (yellow). Below it: Perch's top 5 inside the box's group, the species
+chosen, and the Yes / No / Unknown decision with the box's history. The entries shown are an
+illustration, not a review: Perch's top 5 here are Neotropical species, which is the reason a
+reviewer can add any species by hand. See [Review platform](#review-platform-yes--no--unknown-with-a-top-5-species-list).*
+
+## Contents
+
+- [Stages](#stages)
+- [Window-level zero-shot on the long-form recordings](#window-level-zero-shot-on-the-long-form-recordings)
+- [Viewer: where Perch hears each group](#viewer-where-perch-hears-each-group)
+- [Insecta: EarthChirp vs Perch zero-shot](#insecta-earthchirp-vs-perch-zero-shot)
+- [Hybrid on the long-form recordings](#hybrid-on-the-long-form-recordings-earthchirp-for-insects-perch-for-the-rest)
+- [Tightened boxes](#tightened-boxes-where-in-time-and-frequency-each-zero-shot-box-is)
+- [Review platform](#review-platform-yes--no--unknown-with-a-top-5-species-list)
+- [Why the class index exists](#why-the-class-index-exists)
+- [GPU setup (Windows)](#gpu-setup-windows)
+- [Known caveats](#known-caveats)
+- [Repository layout](#repository-layout)
 
 ## Stages
 
@@ -519,6 +554,12 @@ only output, and nothing in it is fed back to a model.
 - Writes `data\review\annotation_log.csv` (the log) and `data\review\prediction_cache.jsonl` (top-5 cache).
 - Needs only `.venv-perch`: stdlib `http.server`, numpy, scipy and PIL. There is no Flask and no CDN.
 
+![Review app: an EarthChirp insect box with kept cells and EarthChirp's top 5](docs/figures/review_app_ec_cells.png)
+
+*An EC-Insecta box (135–165 s). EarthChirp scores it. The tightened box keeps 6.97–16 kHz, and the
+shaded columns are the cells kept at κ 0.5. "cell mask" playback plays only those cells (16 runs
+here, capped at 30 s). The top 5 are EarthChirp prototypes with their level (species / genus).*
+
 **What a box is.** The viewer's boxes: `perch_viewer.perch_boxes` at the listening thresholds
 (Aves 0.94, Amphibia 0.128, EC-Insecta 0.42, Anthropogenic 0.043, …). Each box is tightened with the cell
 maps at the chosen κ (`CellMaps.tighten_boxes`). A box id is `recording|lane|begin|end`, so it does not
@@ -549,6 +590,12 @@ depend on κ.
   - the vocabulary (17,553 names) is Perch labels, EarthChirp names, Raven labels, `taxonomy.csv`,
     `perch_targets.csv` queries, and names added earlier;
   - Enter on free text adds it as typed.
+
+  ![Adding a species that is not in the top 5](docs/figures/review_app_add_species.png)
+
+  *Typing "boobook" lists the matches with their sources (Perch class, Raven label, target list).
+  The last line adds the text as typed.*
+
 - **Decision:** Yes / No / Unknown. Optional comment. "Accept and log" (Ctrl+Enter), then on to the
   next unreviewed box.
 - **Revisiting a box:** a box already logged opens with its last accepted row filled in, and shows its
@@ -581,6 +628,16 @@ Append-only. Every Accept writes a new row and nothing is ever rewritten.
 | `accepted_begin_s`, `accepted_end_s`, `accepted_lo_khz`, `accepted_hi_khz`, `box_edited` | reviewer's box |
 | `decision`, `species`, `species_source`, `comment` | the review |
 | `top5`, `prediction_span` | what the model showed |
+
+One logged row (the screenshot above; illustration only):
+
+```csv
+log_id,logged_at,reviewer,recording,lane,model,threshold,box_begin_s,box_end_s,box_max_score,kappa,tight_begin_s,tight_end_s,tight_lo_khz,tight_hi_khz,accepted_begin_s,accepted_end_s,accepted_lo_khz,accepted_hi_khz,box_edited,decision,species,species_source,top5,prediction_span,comment,app_version
+ddf7ec42a062,2026-11-16T10:48:40,demo,S01634_20250228_012000,Aves,Perch,0.94,127.5,140.0,0.964742,0.5,127.5,136.875,0.955,2.864,127.5,136.875,0.955,2.864,0,yes,Glaucidium brasilianum; Ninox boobook,top1; added,Glaucidium brasilianum=0.3746 | Piprites chloris=0.0912 | Cuculus solitarius=0.0653 | Bucco tamatia=0.0255 | Monasa nigrifrons=0.0212,127.50-136.88,"illustration only, not a real review",1
+```
+
+The screenshots were taken in headless Chrome over CDP. The server ran on a separate port with a
+throwaway `--review-dir`, which was deleted afterwards.
 
 **Laptop loopback fix.** On this laptop, responses over ~70 KB lost their last 25–40 KB and the browser
 hung or got WinError 10054.
@@ -724,3 +781,28 @@ These belong in the write-up, not just here:
   as *Purana* sp., not a species ID.
 - **Weather data is misaligned** — station S07, daily, full-year 2025, against
   7 days of audio. Not usable as a covariate as it stands.
+
+## Repository layout
+
+```
+scripts/              Perch / EarthChirp zero-shot pipeline (this page)
+    build_manifest.py, make_splits.py, build_taxonomy_map.py, extract_perch.py, score_zeroshot.py
+    zeroshot_windows.py      Perch group scores per 5 s window, long-form recordings
+    earthchirp_windows.py    EarthChirp cosine / margin per window
+    insecta_compare.py       EarthChirp vs Perch on Insecta
+    cell_maps.py             Perch 16 x 4 cells -> tightened boxes
+    perch_viewer.py          viewer helpers, filtered playback
+    review_app.py/.html      local review platform
+config/               Perch class index, taxonomy, target list
+jobs/                 SLURM job for GPU extraction
+notebooks/            perch_zeroshot_viewer.ipynb (this page); 01_box_viewer, 02_cluster_gallery (biodetect)
+src/biodetect/        Guerrero et al. (2023) package, see BIODETECT.md
+tests/, examples/     biodetect tests and synthetic demo
+docs/figures/         README figures
+data/                 manifest.csv, splits.csv, zeroshot_report.csv (caches are git-ignored)
+```
+
+## License
+
+No license has been chosen yet, so all rights are reserved by the author. Please ask before reusing
+the code.

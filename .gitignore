@@ -1,3 +1,28 @@
+# outputs and audio stay local
+results/
+*.wav
+*.flac
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# jupyter
+.ipynb_checkpoints/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
 # Source audio: 13 GB across seven Google Drive download splits, and the
 # weather export. These are inputs, not artefacts - they live in Drive, and
 # data/manifest.csv references them in place rather than copying them.
@@ -12,7 +37,6 @@ data/perch*/
 # Environment
 .venv-perch/
 .cache/
-__pycache__/
 *.pyc
 
 # Local corpora, model checkpoints and other projects (too large or not ours to publish)
@@ -26,5 +50,4 @@ data/insecta_compare/
 data/review/
 
 # Notebook / editor scratch
-.ipynb_checkpoints/
 .virtual_documents/
