@@ -14,3 +14,17 @@ data/perch*/
 .cache/
 __pycache__/
 *.pyc
+
+# Local corpora, model checkpoints and other projects (too large or not ours to publish)
+dataset/
+external/
+bioacoustic_richness/
+anaconda_projects/
+
+# Derived outputs and the reviewer's own log
+data/insecta_compare/
+data/review/
+
+# Notebook / editor scratch
+.ipynb_checkpoints/
+.virtual_documents/

@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Box Review</title>
+<style>
+:root {
+  --bg: #f6f6f3; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #dcdcd6;
+  --accent: #2458c6; --yes: #23863a; --no: #c0392b; --unk: #a07800; --sel: #e8eefb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #20201e; --ink: #ecece8; --muted: #9b9b94; --line: #3a3a36;
+    --accent: #7ea3f2; --yes: #4cc26a; --no: #ef6b5e; --unk: #e0b43c; --sel: #27324a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+header { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 8px 14px;
+  background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 15px; margin: 0 6px 0 0; }
+label.inl { display: inline-flex; gap: 5px; align-items: center; }
+select, input, textarea, button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
+select, input { padding: 3px 6px; }
+button { padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+.lanes { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.lanes label { display: inline-flex; gap: 4px; align-items: center; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+main { display: grid; grid-template-columns: 290px 1fr; gap: 12px; padding: 12px 14px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } #list { max-height: 260px; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+#list { overflow-y: auto; max-height: calc(100vh - 90px); padding: 0; }
+#list .row { display: grid; grid-template-columns: 18px 1fr auto; gap: 6px; padding: 5px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+#list .row:hover { background: var(--sel); }
+#list .row.cur { background: var(--sel); outline: 2px solid var(--accent); outline-offset: -2px; }
+#list .st { font-weight: 700; text-align: center; }
+.st.yes { color: var(--yes); } .st.no { color: var(--no); } .st.unknown { color: var(--unk); }
+.small { font-size: 12px; color: var(--muted); }
+#right { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+#specwrap { position: relative; }
+#spec { width: 100%; height: 440px; display: block; background: #000; border-radius: 4px; cursor: crosshair; touch-action: none; }
+.bar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 8px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 1200px) { .grid2 { grid-template-columns: 1fr; } }
+.dec button { min-width: 92px; font-weight: 600; }
+.dec button.on.yes { background: var(--yes); color: #fff; border-color: var(--yes); }
+.dec button.on.no { background: var(--no); color: #fff; border-color: var(--no); }
+.dec button.on.unknown { background: var(--unk); color: #fff; border-color: var(--unk); }
+table.top { width: 100%; border-collapse: collapse; }
+table.top td { padding: 3px 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.top td.k { width: 22px; color: var(--muted); }
+.score { display: inline-block; height: 6px; background: var(--accent); border-radius: 3px; vertical-align: middle; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; min-height: 26px; }
+.chip { display: inline-flex; gap: 6px; align-items: center; padding: 2px 8px; border-radius: 12px; background: var(--sel); border: 1px solid var(--line); }
+.chip b { cursor: pointer; color: var(--muted); }
+#sugg { position: absolute; z-index: 10; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; max-height: 260px; overflow-y: auto; width: 100%; display: none; }
+#sugg div { padding: 4px 8px; cursor: pointer; } #sugg div.hi, #sugg div:hover { background: var(--sel); }
+.num input { width: 78px; }
+textarea { width: 100%; min-height: 44px; padding: 5px; }
+.err { color: var(--no); }
+.hist { font-size: 12px; max-height: 120px; overflow-y: auto; }
+details summary { cursor: pointer; color: var(--muted); }
+kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Box review</h1>
+  <label class="inl">Recording <select id="rec"></select></label>
+  <div class="lanes" id="lanes"></div>
+  <label class="inl" title="cells kept at this share of the way from the box median to its max">κ <input id="kappa" type="number" step="0.05" min="0" max="1" style="width:64px"></label>
+  <label class="inl">Reviewer <input id="reviewer" placeholder="your name" style="width:120px"></label>
+  <span class="small" id="logstat"></span>
+</header>
+<main>
+  <div class="card" id="list"></div>
+  <div id="right">
+    <div class="card">
+      <div class="bar" style="margin-top:0">
+        <b id="title">–</b><span class="small" id="subtitle"></span>
+      </div>
+      <div id="specwrap" style="margin-top:6px"><canvas id="spec"></canvas></div>
+      <div class="bar">
+        <button id="panL" title="pan left">◀</button><button id="zoomOut" title="zoom out">−</button>
+        <button id="zoomIn" title="zoom in">+</button><button id="panR" title="pan right">▶</button>
+        <button id="viewBox">fit box</button>
+        <label class="inl">to <select id="fview"><option>4</option><option>8</option><option>12</option><option selected>16</option><option>24</option></select> kHz</label>
+        <label class="inl"><input type="checkbox" id="showRaven" checked> Raven boxes</label>
+        <label class="inl"><input type="checkbox" id="showCells" checked> kept cells</label>
+        <span class="small">Drag on the spectrogram to redraw the box.</span>
+      </div>
+      <div class="bar">
+        <button id="play" class="primary">▶ play box</button><button id="stop">■</button>
+        <label class="inl">Play <select id="mode"><option>original</option><option>band-passed</option><option>cell mask</option></select></label>
+        <label class="inl">pad <select id="pad"><option>0</option><option selected>0.5</option><option>1</option><option>2</option></select> s</label>
+        <span class="small" id="playnote"></span>
+        <audio id="audio"></audio>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <div class="bar" style="margin-top:0"><b>Model's top 5</b><span class="small" id="scorename"></span></div>
+        <div id="topwrap" class="small">–</div>
+        <details id="allwrap" style="margin-top:6px; display:none"><summary>Perch's top 5 over all classes</summary><div id="topall"></div></details>
+        <div style="margin-top:10px"><b>Species in the box</b> <span class="small">(tick above, or add any name)</span></div>
+        <div class="chips" id="chips"></div>
+        <div style="position:relative">
+          <input id="addsp" placeholder="add a species: type a scientific or common name, Enter adds" style="width:100%">
+          <div id="sugg"></div>
+        </div>
+      </div>
+      <div class="card">
+        <b>Is there a sound of this box's group in the box?</b>
+        <div class="bar dec">
+          <button data-d="yes" class="yes">Yes <kbd>Y</kbd></button>
+          <button data-d="no" class="no">No <kbd>N</kbd></button>
+          <button data-d="unknown" class="unknown">Unknown <kbd>U</kbd></button>
+        </div>
+        <div class="bar num">
+          <b>Box</b>
+          <label class="inl">from <input id="b0" type="number" step="0.01"> s</label>
+          <label class="inl">to <input id="b1" type="number" step="0.01"> s</label>
+          <label class="inl"><input id="f0" type="number" step="0.01"> –</label>
+          <label class="inl"><input id="f1" type="number" step="0.01"> kHz</label>
+        </div>
+        <div class="bar">
+          <button id="resetTight">tightened box</button><button id="resetFull">model box</button>
+          <button id="repredict" title="top 5 for the box as drawn now">top 5 for this box</button>
+          <span class="small" id="edited"></span>
+        </div>
+        <div style="margin-top:8px"><textarea id="comment" placeholder="comment (optional)"></textarea></div>
+        <div class="bar">
+          <button id="accept" class="primary" disabled>Accept and log <kbd>Ctrl+Enter</kbd></button>
+          <label class="inl"><input type="checkbox" id="advance" checked> then next unreviewed</label>
+          <span id="msg" class="small"></span>
+        </div>
+        <details style="margin-top:6px"><summary>History of this box</summary><div class="hist" id="hist"></div></details>
+        <details style="margin-top:6px"><summary>Keys</summary><div class="small">
+          <kbd>Y</kbd>/<kbd>N</kbd>/<kbd>U</kbd> decision · <kbd>1</kbd>–<kbd>5</kbd> tick a top-5 name ·
+          <kbd>Space</kbd> play/stop · <kbd>←</kbd>/<kbd>→</kbd> previous/next box · <kbd>J</kbd> next unreviewed ·
+          <kbd>Ctrl+Enter</kbd> accept. Keys do nothing while you type in a field.</div></details>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const api = async (path, opts) => {
+  const r = await fetch(path, opts);
+  const j = await r.json();
+  if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+  return j;
+};
+const fmt = (x, n = 2) => Number(x).toFixed(n);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const store = {get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+               set(k, v) { try { localStorage.setItem(k, v); } catch {} }};
+
+let META = null, BOXES = [], cur = -1, BOX = null, PRED = null, RAVEN = [];
+let view = [0, 10], img = null, imgView = null, fmaxPng = 24;
+let acc = null;                 // accepted box [t0, t1, lo, hi]
+let decision = "", species = [];   // species: {name, source}
+let clipStart = 0, drag = null;
+
+// ---------------- setup ----------------
+async function init() {
+  META = await api("/api/meta");
+  $("kappa").value = store.get("kappa", META.kappa);
+  $("reviewer").value = store.get("reviewer", "");
+  const on = JSON.parse(store.get("lanes", "null") || "null") || META.default_on;
+  $("lanes").innerHTML = META.lanes.map(g =>
+    `<label><input type="checkbox" value="${g}" ${on.includes(g) ? "checked" : ""}><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${g} <span class="small">≥${META.thresholds[g]}</span></label>`).join("");
+  fillRecs();
+  $("rec").value = store.get("rec", META.recordings[0].id);
+  if (!$("rec").value) $("rec").value = META.recordings[0].id;
+  logStat();
+  await loadRec(+store.get("boxn", 0));
+}
+function lanesOn() { return [...$("lanes").querySelectorAll("input:checked")].map(x => x.value); }
+function fillRecs() {
+  const on = lanesOn(), v = $("rec").value;
+  $("rec").innerHTML = META.recordings.map(r => {
+    const n = on.reduce((s, g) => s + (r.counts[g] || 0), 0);
+    return `<option value="${r.id}">${r.id} · ${n} boxes${r.reviewed ? ` · ${r.reviewed} logged` : ""}</option>`;
+  }).join("");
+  if (v) $("rec").value = v;
+}
+function logStat() { $("logstat").textContent = `${META.n_logged} rows in ${META.log_file}`; }
+
+async function loadRec(startN) {
+  store.set("rec", $("rec").value);
+  const all = await api(`/api/boxes?rec=${encodeURIComponent($("rec").value)}&kappa=${$("kappa").value}`);
+  const on = lanesOn();
+  BOXES = all.filter(b => on.includes(b.lane));
+  renderList();
+  if (!BOXES.length) { cur = -1; $("title").textContent = "no boxes in the chosen lanes"; return; }
+  let i = BOXES.findIndex(b => b.n === startN);
+  await select(i >= 0 ? i : 0);
+}
+function renderList() {
+  const mark = {yes: "✓", no: "✗", unknown: "?"};
+  $("list").innerHTML = BOXES.map((b, i) =>
+    `<div class="row${i === cur ? " cur" : ""}" data-i="${i}">
+       <span class="st ${b.decision}">${mark[b.decision] || "·"}</span>
+       <span><span class="sw" style="background:${META.colors[b.lane] || "#888"}"></span> ${b.lane}
+         <span class="small">#${b.n} ${fmt(b.begin_s, 1)}–${fmt(b.end_s, 1)} s</span>
+         ${b.species ? `<br><span class="small">${esc(b.species)}</span>` : ""}</span>
+       <span class="small">${fmt(b.max_score, 3)}</span></div>`).join("");
+  const el = $("list").querySelector(".cur");
+  if (el) el.scrollIntoView({block: "nearest"});
+}
+
+// ---------------- one box ----------------
+async function select(i) {
+  if (i < 0 || i >= BOXES.length) return;
+  stopAudio();
+  $("playnote").textContent = "";
+  cur = i; renderList();
+  store.set("boxn", BOXES[i].n);
+  const kap = $("kappa").value;
+  BOX = await api(`/api/box?id=${encodeURIComponent(BOXES[i].id)}&kappa=${kap}`);
+  fmaxPng = BOX.fmax_khz;
+  $("title").textContent = `${BOX.lane} #${BOX.n} · ${BOX.recording}`;
+  $("subtitle").textContent = ` model box ${fmt(BOX.begin_s, 1)}–${fmt(BOX.end_s, 1)} s, max score ${fmt(BOX.max_score, 3)} (threshold ${BOX.threshold})` +
+    (BOX.tightened ? ` · tightened ${fmt(BOX.t_begin)}–${fmt(BOX.t_end)} s, ${fmt(BOX.lo_khz)}–${fmt(BOX.hi_khz)} kHz` : " · no cell map: full band");
+  const L = BOX.latest;
+  if (L) {
+    decision = L.decision;
+    const names = L.species ? L.species.split("; ") : [], src = L.species_source ? L.species_source.split("; ") : [];
+    species = names.map((n, k) => ({name: n, source: src[k] || "added"}));
+    acc = [+L.accepted_begin_s, +L.accepted_end_s, +L.accepted_lo_khz, +L.accepted_hi_khz];
+    $("comment").value = L.comment || "";
+  } else {
+    decision = ""; species = [];
+    acc = [BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz];
+    $("comment").value = "";
+  }
+  $("hist").innerHTML = BOX.history.length ? BOX.history.map(h =>
+    `<div>${esc(h.logged_at)} · ${esc(h.reviewer || "–")} · <b>${esc(h.decision)}</b> · ${esc(h.species || "no species")} · ${fmt(h.accepted_begin_s)}–${fmt(h.accepted_end_s)} s ${fmt(h.accepted_lo_khz)}–${fmt(h.accepted_hi_khz)} kHz${h.comment ? " · " + esc(h.comment) : ""}</div>`).join("")
+    : "not logged yet";
+  $("msg").textContent = L ? "already logged: shown as last accepted; Accept again to add a new row" : "";
+  syncFields(); renderDecision(); renderChips();
+  setView(BOX.view);
+  predict();
+}
+function setView(v) {
+  const d = BOX.duration_s;
+  let [a, b] = v; const w = Math.min(b - a, 120);
+  if (a < 0) { a = 0; } if (a + w > d) a = Math.max(0, d - w);
+  view = [a, Math.min(d, a + w)];
+  loadSpec();
+}
+async function loadSpec() {
+  const [a, b] = view, rec = BOX.recording;
+  const want = `${rec}|${a}|${b}`;
+  const im = new Image();
+  im.onload = () => { if (want === `${BOX.recording}|${view[0]}|${view[1]}`) { img = im; imgView = [a, b]; draw(); } };
+  im.src = `/api/spec.png?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}`;
+  try { RAVEN = await api(`/api/raven?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}`); } catch { RAVEN = []; }
+  draw();
+}
+
+async function predict() {
+  const id = BOX.id, t0 = acc[0], t1 = acc[1];
+  $("topwrap").innerHTML = `<span class="small">running ${BOX.model} on the windows of ${fmt(t0)}–${fmt(t1)} s …</span>`;
+  $("allwrap").style.display = "none";
+  try {
+    const p = await api(`/api/predict?id=${encodeURIComponent(id)}&kappa=${$("kappa").value}&t0=${fmt(t0, 2)}&t1=${fmt(t1, 2)}`);
+    if (!BOX || BOX.id !== id) return;
+    PRED = p; renderTop();
+  } catch (e) { $("topwrap").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+function topRow(t, k, src) {
+  const on = species.some(s => s.name.toLowerCase() === t.name.toLowerCase());
+  const extra = [t.kind, t.ebird].filter(Boolean).join(" · ");
+  return `<tr><td class="k">${src.startsWith("top") ? k + 1 : ""}</td>
+    <td><label class="inl"><input type="checkbox" data-name="${esc(t.name)}" data-src="${src}" ${on ? "checked" : ""}> <b>${esc(t.name)}</b></label>
+      <span class="small">${esc(extra)}</span></td>
+    <td style="width:120px"><span class="score" style="width:${Math.max(2, Math.min(1, Math.max(0, t.score)) * 80)}px"></span> <span class="small">${fmt(t.score, 3)}</span></td>
+    <td style="width:60px"><button class="pw" data-at="${t.at_s}" title="play the 5 s window where it scored highest">▶ ${fmt(t.at_s, 1)}</button></td></tr>`;
+}
+function renderTop() {
+  if (!PRED) return;
+  $("scorename").textContent = ` ${PRED.score_name}, ${PRED.windows.length} window${PRED.windows.length > 1 ? "s" : ""}` +
+    (Math.abs(PRED.span[0] - acc[0]) > 1e-3 || Math.abs(PRED.span[1] - acc[1]) > 1e-3 ? ` · for ${fmt(PRED.span[0])}–${fmt(PRED.span[1])} s` : "");
+  $("topwrap").innerHTML = `<table class="top">${PRED.top.map((t, k) => topRow(t, k, "top" + (k + 1))).join("")}</table>`;
+  if (PRED.top_all && PRED.top_all.length) {
+    $("allwrap").style.display = "";
+    $("topall").innerHTML = `<table class="top">${PRED.top_all.map((t, k) => topRow(t, k, "perch_all")).join("")}</table>`;
+  }
+}
+document.addEventListener("change", e => {
+  const c = e.target;
+  if (c.matches("input[data-name]")) toggleSpecies(c.dataset.name, c.dataset.src, c.checked);
+});
+document.addEventListener("click", e => {
+  const b = e.target.closest("button.pw");
+  if (b) playRange(+b.dataset.at, +b.dataset.at + 5, 0, "original", "Perch window");
+});
+function toggleSpecies(name, src, on) {
+  species = species.filter(s => s.name.toLowerCase() !== name.toLowerCase());
+  if (on) species.push({name, source: src});
+  renderChips(); renderTop();
+}
+function renderChips() {
+  $("chips").innerHTML = species.length ? species.map((s, k) =>
+    `<span class="chip">${esc(s.name)} <span class="small">${esc(s.source)}</span><b data-k="${k}" title="remove">×</b></span>`).join("")
+    : `<span class="small">none chosen</span>`;
+}
+$("chips").addEventListener("click", e => {
+  if (e.target.dataset.k !== undefined) { species.splice(+e.target.dataset.k, 1); renderChips(); renderTop(); }
+});
+
+// ---------------- add species ----------------
+let suggs = [], hi = -1, sTimer = null;
+$("addsp").addEventListener("input", () => {
+  clearTimeout(sTimer);
+  sTimer = setTimeout(async () => {
+    const q = $("addsp").value.trim();
+    suggs = q ? await api(`/api/species?q=${encodeURIComponent(q)}`) : [];
+    hi = -1; renderSugg();
+  }, 120);
+});
+function renderSugg() {
+  const q = $("addsp").value.trim();
+  if (!q) { $("sugg").style.display = "none"; return; }
+  const exact = suggs.some(s => s.name.toLowerCase() === q.toLowerCase());
+  $("sugg").innerHTML = suggs.map((s, k) =>
+    `<div data-k="${k}" class="${k === hi ? "hi" : ""}"><b>${esc(s.name)}</b> <span class="small">${esc(s.source)} ${esc(s.note)}</span></div>`).join("")
+    + (exact ? "" : `<div data-k="-2"><i>add “${esc(q)}” as typed</i> <span class="small">(not in any list)</span></div>`);
+  $("sugg").style.display = "block";
+}
+function addSpecies(name) {
+  name = name.trim(); if (!name) return;
+  if (!species.some(s => s.name.toLowerCase() === name.toLowerCase())) species.push({name, source: "added"});
+  $("addsp").value = ""; suggs = []; $("sugg").style.display = "none";
+  renderChips(); renderTop();
+}
+$("sugg").addEventListener("mousedown", e => {
+  const d = e.target.closest("div[data-k]"); if (!d) return;
+  e.preventDefault();
+  addSpecies(+d.dataset.k >= 0 ? suggs[+d.dataset.k].name : $("addsp").value);
+});
+$("addsp").addEventListener("keydown", e => {
+  if (e.key === "ArrowDown") { hi = Math.min(suggs.length - 1, hi + 1); renderSugg(); e.preventDefault(); }
+  else if (e.key === "ArrowUp") { hi = Math.max(-1, hi - 1); renderSugg(); e.preventDefault(); }
+  else if (e.key === "Enter" && !e.ctrlKey) { addSpecies(hi >= 0 ? suggs[hi].name : $("addsp").value); e.preventDefault(); }
+  else if (e.key === "Escape") { $("sugg").style.display = "none"; }
+});
+$("addsp").addEventListener("blur", () => setTimeout(() => $("sugg").style.display = "none", 150));
+
+// ---------------- decision, box fields ----------------
+function renderDecision() {
+  document.querySelectorAll(".dec button").forEach(b => b.classList.toggle("on", b.dataset.d === decision));
+  $("accept").disabled = !decision;
+}
+document.querySelectorAll(".dec button").forEach(b => b.addEventListener("click", () => { decision = b.dataset.d; renderDecision(); }));
+function syncFields() {
+  ["b0", "b1", "f0", "f1"].forEach((id, k) => $(id).value = fmt(acc[k], 2));
+  const t = [BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz];
+  $("edited").textContent = acc.some((x, k) => Math.abs(x - t[k]) > 1e-3) ? "box edited (differs from the tightened box)" : "";
+}
+["b0", "b1", "f0", "f1"].forEach((id, k) => $(id).addEventListener("change", () => {
+  const v = parseFloat($(id).value); if (isFinite(v)) acc[k] = v;
+  syncFields(); draw();
+}));
+$("resetTight").onclick = () => { acc = [BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz]; syncFields(); draw(); };
+$("resetFull").onclick = () => { acc = [BOX.begin_s, BOX.end_s, 0.06, 16.0]; syncFields(); draw(); };
+$("repredict").onclick = () => predict();
+
+// ---------------- accept ----------------
+async function accept() {
+  if (!decision || !BOX) return;
+  if (!(acc[0] < acc[1] && acc[2] < acc[3])) { $("msg").innerHTML = `<span class="err">box needs from &lt; to and low &lt; high</span>`; return; }
+  const body = {id: BOX.id, kappa: +$("kappa").value, reviewer: $("reviewer").value, decision, species,
+    begin_s: acc[0], end_s: acc[1], lo_khz: acc[2], hi_khz: acc[3], comment: $("comment").value,
+    top: PRED ? PRED.top : [], prediction_span: PRED ? `${fmt(PRED.span[0])}-${fmt(PRED.span[1])}` : ""};
+  try {
+    const row = await api("/api/log", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    META.n_logged += 1; logStat();
+    const r = META.recordings.find(r => r.id === BOX.recording);
+    if (!BOXES[cur].decision) r.reviewed += 1;
+    BOXES[cur].decision = row.decision; BOXES[cur].species = row.species;
+    $("msg").textContent = `logged ${row.log_id} (${row.decision}${row.species ? ", " + row.species : ""})`;
+    fillRecs(); renderList();
+    if ($("advance").checked) nextUnreviewed();
+  } catch (e) { $("msg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+$("accept").onclick = accept;
+function nextUnreviewed() {
+  for (let k = 1; k <= BOXES.length; k++) {
+    const i = (cur + k) % BOXES.length;
+    if (!BOXES[i].decision) { select(i); return; }
+  }
+  $("msg").textContent += " · every box in this recording and these lanes is logged";
+}
+
+// ---------------- drawing ----------------
+const cv = $("spec"), ctx = cv.getContext("2d");
+const PADL = 42, PADB = 22;
+function geom() {
+  const W = cv.clientWidth, H = cv.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const fv = +$("fview").value;
+  return {W, H, x0: PADL, x1: W - 6, y0: 6, y1: H - PADB, fv};
+}
+const tx = (g, t) => g.x0 + (t - view[0]) / (view[1] - view[0]) * (g.x1 - g.x0);
+const fy = (g, f) => g.y1 - f / g.fv * (g.y1 - g.y0);
+const xt = (g, x) => view[0] + (x - g.x0) / (g.x1 - g.x0) * (view[1] - view[0]);
+const yf = (g, y) => (g.y1 - y) / (g.y1 - g.y0) * g.fv;
+function draw() {
+  if (!BOX) return;
+  const g = geom();
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, g.W, g.H);
+  ctx.fillStyle = "#fff"; ctx.fillRect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0);
+  if (img && imgView) {
+    // image spans imgView in time and 0..fmaxPng in frequency (top = fmaxPng)
+    const fr = Math.min(1, g.fv / fmaxPng), sh = img.height * fr;
+    const ix0 = tx(g, imgView[0]), ix1 = tx(g, imgView[1]);
+    ctx.save(); ctx.beginPath(); ctx.rect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0); ctx.clip();
+    ctx.drawImage(img, 0, img.height - sh, img.width, sh, ix0, fy(g, Math.min(g.fv, fmaxPng)), ix1 - ix0, g.y1 - fy(g, Math.min(g.fv, fmaxPng)));
+    ctx.restore();
+  }
+  ctx.save(); ctx.beginPath(); ctx.rect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0); ctx.clip();
+  const col = META.colors[BOX.lane] || "#e6194b";
+  // Raven boxes
+  if ($("showRaven").checked) {
+    ctx.font = "11px system-ui";
+    RAVEN.forEach(r => {
+      const X0 = tx(g, r.begin_s), X1 = tx(g, r.end_s), Y0 = fy(g, r.hi_khz), Y1 = fy(g, r.lo_khz);
+      ctx.strokeStyle = "rgba(40,110,255,.9)"; ctx.lineWidth = 1.2; ctx.setLineDash([2, 2]);
+      ctx.strokeRect(X0, Y0, X1 - X0, Y1 - Y0);
+      ctx.setLineDash([]); ctx.fillStyle = "rgba(40,110,255,.95)";
+      ctx.fillText("Raven: " + r.label, Math.max(g.x0 + 2, X0 + 2), Math.max(g.y0 + 11, Y0 + 11));
+    });
+  }
+  // kept cells
+  if ($("showCells").checked) {
+    ctx.fillStyle = hexA(col, .22);
+    BOX.kept_rects.forEach(([a, b, lo, hi]) => ctx.fillRect(tx(g, a), fy(g, hi), tx(g, b) - tx(g, a), fy(g, lo) - fy(g, hi)));
+  }
+  // model box (full Perch band), dashed
+  ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+  ctx.strokeRect(tx(g, BOX.begin_s), fy(g, 16), tx(g, BOX.end_s) - tx(g, BOX.begin_s), fy(g, 0.06) - fy(g, 16));
+  // tightened box, solid thin
+  ctx.setLineDash([]); ctx.lineWidth = 1;
+  ctx.strokeRect(tx(g, BOX.t_begin), fy(g, BOX.hi_khz), tx(g, BOX.t_end) - tx(g, BOX.t_begin), fy(g, BOX.lo_khz) - fy(g, BOX.hi_khz));
+  // accepted box, thick
+  const A = drag && drag.rect ? drag.rect : acc;
+  ctx.lineWidth = 2.5; ctx.strokeStyle = "#111"; ctx.strokeRect(tx(g, A[0]), fy(g, A[3]), tx(g, A[1]) - tx(g, A[0]), fy(g, A[2]) - fy(g, A[3]));
+  ctx.lineWidth = 1.2; ctx.strokeStyle = "#ffd400"; ctx.strokeRect(tx(g, A[0]), fy(g, A[3]), tx(g, A[1]) - tx(g, A[0]), fy(g, A[2]) - fy(g, A[3]));
+  // playhead
+  const au = $("audio");
+  if (!au.paused) { const x = tx(g, clipStart + au.currentTime); ctx.strokeStyle = "#e00"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x, g.y0); ctx.lineTo(x, g.y1); ctx.stroke(); }
+  ctx.restore();
+  // axes
+  ctx.fillStyle = "#ddd"; ctx.font = "11px system-ui"; ctx.strokeStyle = "#888"; ctx.lineWidth = 1;
+  const span = view[1] - view[0], step = [0.5, 1, 2, 5, 10, 20, 30, 60].find(s => span / s <= 12) || 120;
+  for (let t = Math.ceil(view[0] / step) * step; t <= view[1]; t += step) {
+    const x = tx(g, t); ctx.beginPath(); ctx.moveTo(x, g.y1); ctx.lineTo(x, g.y1 + 4); ctx.stroke();
+    ctx.fillText(secs(t), x - 14, g.H - 6);
+  }
+  const fstep = g.fv <= 4 ? 0.5 : g.fv <= 8 ? 1 : g.fv <= 16 ? 2 : 4;
+  for (let f = 0; f <= g.fv + 1e-9; f += fstep) { const y = fy(g, f); ctx.beginPath(); ctx.moveTo(g.x0 - 4, y); ctx.lineTo(g.x0, y); ctx.stroke(); ctx.fillText(f + "k", 4, y + 4); }
+}
+function secs(t) { const m = Math.floor(t / 60), s = t - 60 * m; return `${m}:${s.toFixed(span1() ? 1 : 0).padStart(span1() ? 4 : 2, "0")}`; }
+function span1() { return view[1] - view[0] <= 12; }
+function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
+window.addEventListener("resize", draw);
+["fview", "showRaven", "showCells"].forEach(id => $(id).addEventListener("change", draw));
+
+// drag to redraw the accepted box
+cv.addEventListener("pointerdown", e => {
+  if (!BOX) return;
+  const g = geom(), r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  if (x < g.x0 || y > g.y1) return;
+  drag = {t: xt(g, x), f: yf(g, y), rect: null};
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const g = geom(), r = cv.getBoundingClientRect();
+  const t = Math.max(0, Math.min(BOX.duration_s, xt(g, e.clientX - r.left))), f = Math.max(0, Math.min(fmaxPng, yf(g, e.clientY - r.top)));
+  drag.rect = [Math.min(drag.t, t), Math.max(drag.t, t), Math.min(drag.f, f), Math.max(drag.f, f)];
+  draw();
+});
+cv.addEventListener("pointerup", () => {
+  if (drag && drag.rect && drag.rect[1] - drag.rect[0] > 0.05 && drag.rect[3] - drag.rect[2] > 0.05) { acc = drag.rect.map(v => Math.round(v * 1000) / 1000); syncFields(); }
+  drag = null; draw();
+});
+
+// view controls
+$("panL").onclick = () => { const w = view[1] - view[0]; setView([view[0] - w * .75, view[1] - w * .75]); };
+$("panR").onclick = () => { const w = view[1] - view[0]; setView([view[0] + w * .75, view[1] + w * .75]); };
+$("zoomIn").onclick = () => { const c = (view[0] + view[1]) / 2, w = Math.max(2, (view[1] - view[0]) / 2); setView([c - w / 2, c + w / 2]); };
+$("zoomOut").onclick = () => { const c = (view[0] + view[1]) / 2, w = (view[1] - view[0]) * 2; setView([c - w / 2, c + w / 2]); };
+$("viewBox").onclick = () => setView(BOX.view);
+
+// ---------------- audio ----------------
+const au = $("audio");
+function playRange(t0, t1, pad, mode, what) {
+  if (!BOX) return;
+  stopAudio();
+  clipStart = Math.max(0, t0 - pad);
+  const q = new URLSearchParams({id: BOX.id, kappa: $("kappa").value, t0, t1, lo: acc[2], hi: acc[3], pad, mode});
+  au.src = `/api/audio.wav?${q}`;
+  const end = Math.min(t1 + pad, clipStart + 30);
+  $("playnote").textContent = `${what}: ${fmt(clipStart)}–${fmt(end)} s, ${mode}` +
+    (mode === "band-passed" ? ` ${fmt(acc[2])}–${fmt(acc[3])} kHz` : mode === "cell mask" ? (BOX.tightened ? ` (${BOX.kept_rects.length} cell runs; the edited box is not used)` : " (no cell map: unfiltered)") : "") +
+    (t1 + pad > clipStart + 30 ? " · capped at 30 s" : "");
+  if (clipStart < view[0] || end > view[1]) { /* keep the view; playhead may leave it */ }
+  au.play().catch(() => {});
+  tick();
+}
+function tick() { draw(); if (!au.paused) requestAnimationFrame(tick); }
+function stopAudio() { au.pause(); draw(); }
+$("play").onclick = () => au.paused ? playRange(acc[0], acc[1], +$("pad").value, $("mode").value, "box") : stopAudio();
+$("stop").onclick = stopAudio;
+au.addEventListener("ended", draw);
+au.addEventListener("error", () => { $("playnote").innerHTML = `<span class="err">audio failed to load</span>`; });
+
+// ---------------- header controls, keys ----------------
+$("rec").onchange = () => loadRec(0);
+$("lanes").addEventListener("change", () => { store.set("lanes", JSON.stringify(lanesOn())); fillRecs(); loadRec(BOXES[cur] ? BOXES[cur].n : 0); });
+$("kappa").onchange = () => { store.set("kappa", $("kappa").value); loadRec(BOXES[cur] ? BOXES[cur].n : 0); };
+$("reviewer").onchange = () => store.set("reviewer", $("reviewer").value.trim());
+$("list").addEventListener("click", e => { const r = e.target.closest(".row"); if (r) select(+r.dataset.i); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter" && e.ctrlKey) { accept(); e.preventDefault(); return; }
+  if (e.target.matches("input[type=text], input:not([type]), input[type=number], textarea, select")) return;
+  const k = e.key.toLowerCase();
+  if (k === "y" || k === "n" || k === "u") { decision = {y: "yes", n: "no", u: "unknown"}[k]; renderDecision(); }
+  else if (k >= "1" && k <= "5" && PRED && PRED.top[+k - 1]) {
+    const t = PRED.top[+k - 1], on = species.some(s => s.name.toLowerCase() === t.name.toLowerCase());
+    toggleSpecies(t.name, "top" + k, !on);
+  }
+  else if (k === " ") { $("play").click(); }
+  else if (k === "arrowright") { select(cur + 1); }
+  else if (k === "arrowleft") { select(cur - 1); }
+  else if (k === "j") { nextUnreviewed(); }
+  else return;
+  e.preventDefault();
+});
+
+init().catch(e => { document.body.insertAdjacentHTML("afterbegin", `<p class="err" style="padding:10px">${esc(e.message)}</p>`); });
+</script>
+</body>
+</html>
