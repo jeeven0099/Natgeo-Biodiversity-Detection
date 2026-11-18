@@ -1,18 +1,15 @@
 # Natgeo Biodiversity Detection
 
-[![CI](https://github.com/jeeven0099/Natgeo-Biodiversity-Detection/actions/workflows/ci.yml/badge.svg)](https://github.com/jeeven0099/Natgeo-Biodiversity-Detection/actions/workflows/ci.yml)
-
 Detecting animal species by sound in a single Singapore study area, to assess the biodiversity
 there. It was built in a National Geographic × NUS capstone project. The corpus is one recorder
 (S01634) over 7 days: 134 long-form recordings, plus 4,684 labelled clips filed one folder per
 class.
 
-The repository has two parts:
-
-| Part | Where | What it does |
-|---|---|---|
-| **Perch 2.0 zero-shot survey** (this page) | `scripts/`, `config/`, `notebooks/perch_zeroshot_viewer.ipynb` | Scores every 5 s window of the long recordings for birds, frogs, insects, mammals and human sounds with Perch 2.0 and EarthChirp. Turns the scores into time-frequency boxes. Lets a person review each box in a local web app. |
-| **`biodetect` package** ([BIODETECT.md](BIODETECT.md)) | `src/biodetect/`, `tests/`, `examples/`, `notebooks/0*_*.ipynb` | A label-free implementation of Guerrero et al. (2023): Otsu boxes and LAMDA clustering. It is pip-installable and tested in CI. |
+The pipeline (`scripts/`, `config/`, `notebooks/perch_zeroshot_viewer.ipynb`) scores every 5 s
+window of the long recordings for birds, frogs, insects, mammals and human sounds with Perch 2.0 and
+EarthChirp. It turns the scores into time-frequency boxes and lets a person review each box in a
+local web app. Small learners fitted to those reviews then refine the thresholds, the boxes, the
+group calls and the species names.
 
 The pipeline caches Perch 2.0 embeddings and logits once, then scores against our own labels.
 Everything after extraction needs only numpy and scikit-learn, so the expensive stage runs once and
@@ -20,18 +17,79 @@ analysis iterates cheaply.
 
 ### The review platform at a glance
 
+![Review app in minute view: one minute of S01634_20250228_012000 with an Aves box open, its learned species names, the zero-shot top 5 and the Yes / No / Unknown panel](docs/figures/review_app_minute.png)
+
+*`scripts/review_app.py` as it runs now (2026-11-18), with the refitted learners loaded. Minute
+view of one minute of S01634_20250228_012000: the list on the left holds only the boxes of that
+minute, from every lane and source. The open box is Aves #15 (127.5–140.0 s). The taxon head gives
+it p = 0.989 and the box refiner's edges have confidence 0.90. Above Perch's zero-shot top 5, the
+learned names from the reviewed prototypes come first (*Mixornis gularis* 0.477, *Surniculus
+lugubris* 0.329). Below sit the Yes / No / Unknown panel, the recording overview strip and the
+display controls (colour map, STFT size, tape speed). The species shown are the models'
+suggestions, not a review. See [Review platform](#review-platform-yes--no--unknown-with-a-top-5-species-list)
+and [Current results](#current-results-2026-11-18).*
+
 ![Review app: a logged Aves box with its spectrogram, Perch's top 5 and the reviewer's decision](docs/figures/review_app_logged.png)
 
-*`scripts/review_app.py` on one Aves box. Left: every zero-shot box in the recording; ✓ marks a
-logged box. Centre: the spectrogram, with Raven boxes (blue dashed), the cells Perch used (shaded)
-and the accepted box (yellow), which the reviewer draws or adjusts by dragging; ▶ plays only that
-box. Below it: Perch's top 5 inside the box's group, each as scientific name · English common
-name, the species chosen, and the Yes / No / Unknown decision with the box's history. The entries shown are an
-illustration, not a review: Perch's top 5 here are Neotropical species, which is the reason a
-reviewer can add any species by hand. See [Review platform](#review-platform-yes--no--unknown-with-a-top-5-species-list).*
+*The earlier single-box view of one logged Aves box. Left: every zero-shot box in the recording;
+✓ marks a logged box. Centre: the spectrogram, with Raven boxes (blue dashed), the cells Perch used
+(shaded) and the accepted box (yellow), which the reviewer draws or adjusts by dragging; ▶ plays
+only that box. Below it: Perch's top 5 inside the box's group, each as scientific name · English
+common name, the species chosen, and the decision with the box's history. The entries are an
+illustration, not a review: Perch's top 5 here are Neotropical species, which is why a reviewer can
+add any species by hand.*
+
+## Current results (2026-11-18)
+
+These numbers come from the refit after the latest round of active learning: 6,883 log rows,
+including the Raven labels logged as reviews. Perch 2.0 and EarthChirp stay frozen. Each learner is
+a small model on their outputs, scored on held-out recordings, with a 95% bootstrap CI over
+recordings. A learner is adopted only if the low end of its CI is above 0. The 70 log rows on added
+audio (`data/uploads`) are left out, because added audio has no split.
+
+**Zero-shot baseline vs the Raven boxes** (window ROC AUC, leave-one-day-out): Aves 0.767,
+Amphibia 0.878, Insecta 0.585 (EarthChirp margin 0.815 [0.771, 0.855]), Mammalia 0.770,
+Anthropogenic 0.862, Weather 0.962.
+
+**Taxon head** (is this group present in the segment; held-out AUROC, positives vs unlabelled):
+
+| Group | Zero-shot → head [CI of the gain] | Decision |
+|---|---|---|
+| Aves | 0.758 → 0.921 [+0.112, +0.227] | adopt |
+| Amphibia | 0.864 → 0.985 [+0.036, +0.655] | adopt (13 recordings, wide CI) |
+| Insecta | 0.612 → 0.903 [+0.230, +0.354] | adopt |
+| Anthropogenic | 0.813 → 0.927 [+0.082, +0.147] | adopt |
+| Weather | 0.958 → 0.971 [−0.033, +0.076] | keep zero-shot |
+| Mammalia | 22 positives, 1 recording | keep zero-shot |
+
+**Learned species names** (19 prototypes): held-out MRR@5 0.289 → 0.859 [+0.506, +0.636];
+hit@1 0.22 → 0.80, hit@5 0.41 → 0.94. Adopted.
+
+**Boxes** (held-out IoU with the reviewer's box):
+
+| Learner | Group | Before → after [CI of the gain] | Decision |
+|---|---|---|---|
+| Box settings (κ, row support) | Aves | 0.166 → 0.248 [+0.057, +0.110] | adopt (0.6, 0.75) |
+| | Anthropogenic | 0.122 → 0.244 [+0.081, +0.192] | adopt (0.1, 0) |
+| | EC-Insecta | 0.162 → 0.175 [+0.002, +0.027] | adopt (0.2, 0.375) |
+| | all | 0.162 → 0.200 [+0.023, +0.054] | adopt (0.5, 0.75) |
+| Box refiner | Aves | 0.166 → 0.237 [+0.050, +0.095] | adopt |
+| | Anthropogenic | 0.122 → 0.221 [+0.038, +0.130] | adopt |
+| | all | 0.162 → 0.181 [+0.011, +0.028] | adopt |
+
+**Thresholds** (held-out gain = recall − share flagged): adopted for Aves (0.94 → 0.9163; gain
+0.240 → 0.333 [+0.062, +0.126]), Anthropogenic (0.043 → 0.01279; 0.226 → 0.286 [+0.023, +0.097]),
+Insecta (0.032 → 0.04009; 0.040 → 0.046 [+0.001, +0.011]) and EC-margin (0.28 → 0.3533; 0.096 →
+0.126 [+0.017, +0.043]). Kept for Amphibia, Weather, EC-Insecta and Mammalia.
+
+The app loads the refiner, the taxon head and the species prototypes at start. The fitted
+thresholds and box settings are recommendations: the app still uses `perch_viewer.THRESHOLDS`,
+`KAPPA` 0.5 and `ROW_SUPPORT` 0.25 until those are changed by hand. Details per learner are in the
+sections below.
 
 ## Contents
 
+- [Current results (2026-11-18)](#current-results-2026-11-18)
 - [Stages](#stages)
 - [Window-level zero-shot on the long-form recordings](#window-level-zero-shot-on-the-long-form-recordings)
 - [Viewer: where Perch hears each group](#viewer-where-perch-hears-each-group)
@@ -1682,6 +1740,17 @@ Perch's name: *Otus lettia* (Perch label 9443, shown in the app as Collared Scop
 
 Restart the app to load them. The box changes fit Raven's bout-style boxes, at held-out IoU 0.17–0.27.
 
+**Refit after active learning** (2026-11-18; 6,883 log rows, the 70 on added audio left out). The
+thresholds and the taxon head now fit on positives only, so the last row above no longer holds:
+
+| Learner | Result |
+|---|---|
+| Species names | **adopted**, τ 0.3, 19 prototypes from 3,174 named rows in 117 recordings: held-out MRR@5 0.289 → 0.859 [+0.506, +0.636]; hit@5 0.41 → 0.94 |
+| Taxon head | **adopted** for Aves, Amphibia, Insecta and Anthropogenic (AUROC 0.921, 0.985, 0.903, 0.927); Weather and Mammalia kept |
+| Thresholds | **adopted** (as recommendations) for Aves, Insecta, Anthropogenic and EC-margin; the rest kept |
+| Box settings (κ, row support) | **adopted** for Aves, Anthropogenic, EC-Insecta and all |
+| Box refiner | **adopted** for Aves, Anthropogenic and all; Insecta kept |
+
 **Tests** (`test_raven_match.py`, `test_raven_autolabel.py` in the session scratchpad):
 
 | Check | Result |
@@ -1815,6 +1884,33 @@ yes boxes, 803 of them pipeline boxes.
 - Insecta (+0.006) and EC-margin (+0.030) rise; both flag less time for less recall.
 - Box settings are as before: Aves (0.6, 0.75) 0.166 → 0.248 [+0.056, +0.111]; Anthropogenic
   (0.1, 0); EC-Insecta (0.2, 0.375); all (0.5, 0.75) 0.160 → 0.196 [+0.021, +0.053]. All adopted.
+
+**After active learning** (2026-11-18, same command): 5,338 taxon labels; 6,770 yes boxes, 819 of
+them pipeline boxes. The 70 log rows on added audio are left out (no split).
+
+| Lane | Threshold | Held-out gain | Recall | Flagged | Decision |
+|---|---|---|---|---|---|
+| Aves | 0.94 → 0.9163 | 0.240 → 0.333 [+0.062, +0.126] | 0.41 → 0.67 | 0.17 → 0.33 | adopt |
+| Amphibia | 0.128 → 0.1327 | 0.642 → 0.623 [−0.065, +0.004] | 0.83 → 0.79 | 0.18 → 0.17 | keep |
+| Insecta | 0.032 → 0.04009 | 0.040 → 0.046 [+0.001, +0.011] | 0.84 → 0.73 | 0.80 → 0.69 | adopt |
+| Mammalia | — | — | — | — | keep: pos 22 < 30, 1 recording |
+| Anthropogenic | 0.043 → 0.01279 | 0.226 → 0.286 [+0.023, +0.097] | 0.43 → 0.69 | 0.21 → 0.41 | adopt |
+| Weather | 0.011 → 0.01416 | 0.439 → 0.452 [−0.002, +0.030] | 0.96 → 0.94 | 0.52 → 0.49 | keep |
+| EC-Insecta | 0.42 → 0.4169 | 0.075 → 0.074 [−0.002, −0.000] | 0.84 → 0.85 | 0.77 → 0.77 | keep |
+| EC-margin | 0.28 → 0.3533 | 0.096 → 0.126 [+0.017, +0.043] | 0.87 → 0.71 | 0.78 → 0.58 | adopt |
+
+| Lane | Setting | Held-out IoU | Decision |
+|---|---|---|---|
+| Aves | (0.6, 0.75) | 0.166 → 0.248 [+0.057, +0.110] | adopt |
+| Anthropogenic | (0.1, 0) | 0.122 → 0.244 [+0.081, +0.192] | adopt |
+| EC-Insecta | (0.2, 0.375) | 0.162 → 0.175 [+0.002, +0.027] | adopt |
+| all | (0.5, 0.75) | 0.162 → 0.200 [+0.023, +0.054] | adopt |
+| Amphibia, Mammalia, Weather | — | too few boxes (16, 3, 4) | keep |
+
+- The decisions are the same as on 2026-11-17. The new reviews moved the numbers only slightly.
+- Amphibia's threshold now sits at 0.1327, and its interval is narrower ([−0.065, +0.004]), but
+  it is still kept.
+- The box setting for all lanes improves (0.196 → 0.200) and EC-Insecta's settles at 0.175.
 
 **What to review first.**
 - **Thresholds:** positives in more recordings, especially Amphibia, Weather and Mammalia. Mark a
@@ -1960,6 +2056,22 @@ Raven 1:1 fits; merges are excluded.
 
 The target is Raven's box style: one box over a bout, often. The adopted settings move the app's
 boxes toward that style, and IoU stays low in absolute terms.
+
+**After active learning** (2026-11-18): 833 pipeline yes boxes, 819 of them shown plain. The 70 log
+rows on added audio are left out.
+
+| Group | Setting | Held-out IoU | Decision |
+|---|---|---|---|
+| Aves | 9 dB, ρ 0.2; confidence ≥ 0.823 | 0.166 → 0.237 [+0.050, +0.095]; 32% refined, 83% no worse | adopt |
+| Anthropogenic | 6 dB, ρ 0.1; confidence ≥ 0.330 | 0.122 → 0.221 [+0.038, +0.130]; 77% refined, 99% no worse | adopt |
+| all | 9 dB, ρ 0.2; confidence ≥ 0.972 | 0.162 → 0.181 [+0.011, +0.028]; 9% refined, 86% no worse | adopt |
+| Insecta | confidence ≥ 0.972 | 0.162 → 0.167 [−0.000, +0.010]; 6% refined, 73% no worse | keep |
+| Amphibia, Mammalia, Weather | — | too few boxes (Amphibia 16) | keep |
+
+- The same groups are adopted as before.
+- **Aves is now more selective.** Its cut rose from 0.812 to 0.823, it refines 32% of boxes rather
+  than 45%, and its gain is smaller (+0.071 against +0.105).
+- Insecta now gets a cut, but its interval touches 0, so it stays kept.
 
 **What to review for it**
 - Accept or fix about 20 model boxes per group across at least 5 recordings. Ticking "box
@@ -2167,6 +2279,29 @@ positive taxon labels. 4 groups adopted.
   "taxon check" source lists runs ≥ the cut outside model boxes. With Aves at 0.408 and Insecta at
   0.536, it will be long. `taxon_segments.csv` (257,472 rows) equals `TaxonHead.segments` on a real
   recording.
+
+**After active learning** (2026-11-18): 5,316 positive taxon labels; the 70 log rows on added audio
+are left out. The same 4 groups are adopted.
+
+| Group | Positive / segments, recordings | Held-out AUROC P vs U | Within recordings (head better) | Cut: recall, flagged (zero-shot at its threshold) | Decision |
+|---|---|---|---|---|---|
+| Aves | 13,706 / 47,555, 99 | 0.758 → 0.921 [+0.112, +0.227] | 0.807 → 0.918 (90 / 97) | 0.384: 0.87, 0.37 (0.41, 0.17) | adopt |
+| Amphibia | 950 / 6,245, 13 | 0.864 → 0.985 [+0.036, +0.655] | 0.543 → 0.888 (9 / 12) | 0.524: 0.94, 0.17 (0.83, 0.18) | adopt |
+| Insecta (EC-Insecta) | 40,738 / 55,720, 116 | 0.612 → 0.903 [+0.230, +0.354] | 0.484 → 0.888 (83 / 90) | 0.536: 0.87, 0.69 (0.84, 0.77) | adopt |
+| Mammalia | 22 / 481, 1 | — | — | — | keep: pos 22 < 30, recordings 1 < 5 |
+| Anthropogenic | 12,213 / 29,776, 62 | 0.813 → 0.927 [+0.082, +0.147] | 0.746 → 0.862 (53 / 62) | 0.509: 0.83, 0.40 (0.43, 0.21) | adopt |
+| Weather | 1,122 / 2,401, 5 | 0.958 → 0.971 [−0.033, +0.076] | 0.878 → 0.913 (4 / 5) | 0.614: 0.91, 0.44 (0.96, 0.52) | keep |
+
+- **Amphibia gained a recording** (13, up from 12) and 25 positives. The low end of its interval
+  rose from +0.029 to +0.036, though the interval is still wide.
+- Aves' cut fell from 0.408 to 0.384, flagging 37% of segments rather than 36%.
+- Insecta, Anthropogenic and Weather are unchanged, with the same positive counts as before.
+
+**Species after active learning** (2026-11-18): adopted, τ 0.3, 19 prototypes from 3,174 named
+rows on 3,174 boxes in 117 recordings.
+- Held-out MRR@5: zero-shot 0.289 → with learned names 0.859 [+0.506, +0.636].
+- hit@1: 0.22 → 0.80. hit@5: 0.41 → 0.94.
+- Learned names are shown on 96% of the 3,153 scored rows.
 
 **What to review so they can fit.**
 - **Taxon:** positives in more recordings (at least 5 per group), placed on the calls rather than
@@ -2457,9 +2592,7 @@ scripts/              Perch / EarthChirp zero-shot pipeline (this page)
     build_common_names.py    English common names (eBird + GBIF) -> config/common_names.csv
 config/               Perch class index, taxonomy, target list, common names
 jobs/                 SLURM job for GPU extraction
-notebooks/            perch_zeroshot_viewer.ipynb (this page); 01_box_viewer, 02_cluster_gallery (biodetect)
-src/biodetect/        Guerrero et al. (2023) package, see BIODETECT.md
-tests/, examples/     biodetect tests and synthetic demo
+notebooks/            perch_zeroshot_viewer.ipynb (the viewer)
 docs/figures/         README figures
 data/                 manifest.csv, splits.csv, zeroshot_report.csv (caches are git-ignored)
 ```
