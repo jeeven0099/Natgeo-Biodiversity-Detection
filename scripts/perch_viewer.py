@@ -92,10 +92,11 @@ def slot_grid(m: np.ndarray) -> np.ndarray:
     return g
 
 
-def tighten(sub: np.ndarray, kappa: float) -> tuple[int, int, int, int, np.ndarray]:
+def tighten(sub: np.ndarray, kappa: float,
+            row_support: float = ROW_SUPPORT) -> tuple[int, int, int, int, np.ndarray]:
     """sub (slots, 4) of one box -> (slot_lo, slot_hi, row_lo, row_hi, kept cells): the bounding
     box of the cells at or above kappa of the way from the box's MEDIAN cell (its background) to
-    its highest cell, in the rows that hold at least ROW_SUPPORT of the kept cells of the
+    its highest cell, in the rows that hold at least row_support of the kept cells of the
     strongest row. kappa 0 keeps the whole box. (From the box minimum instead, scattered
     background cells pass; and 1-3 stray cells in another row would stretch the box to full
     band. Both seen on the smoke recordings' Aves boxes.)"""
@@ -105,7 +106,7 @@ def tighten(sub: np.ndarray, kappa: float) -> tuple[int, int, int, int, np.ndarr
     else:
         keep = (sub - lo) / (hi - lo) >= kappa
         n = keep.sum(0)
-        keep &= (n >= ROW_SUPPORT * n.max())[None, :]
+        keep &= (n >= row_support * n.max())[None, :]
     ts, fs = np.flatnonzero(keep.any(1)), np.flatnonzero(keep.any(0))
     return int(ts[0]), int(ts[-1]) + 1, int(fs[0]), int(fs[-1]) + 1, keep
 
@@ -135,7 +136,8 @@ class CellMaps:
             self._grids = {rec: slot_grid(np.asarray(self.M[a:a + n], np.float32))}   # keep one
         return self._grids[rec]
 
-    def tighten_boxes(self, rec: str, pb: pd.DataFrame, kappa: float) -> pd.DataFrame:
+    def tighten_boxes(self, rec: str, pb: pd.DataFrame, kappa: float,
+                      row_support: float = ROW_SUPPORT) -> pd.DataFrame:
         """Adds t_begin, t_end, lo_khz, hi_khz, area (share of the full box's cells) and kept
         (bool cells x 4 rows, slot 0 = t_begin) to each Perch box; NaN when no map."""
         pb = pb.copy()
@@ -148,7 +150,7 @@ class CellMaps:
                     cols[c].append(np.nan if c != "kept" else None)
                 continue
             sub = g[s0:s1, :, CELL_LANES.index(b.group)]
-            t0, t1, r0, r1, keep = tighten(sub, kappa)
+            t0, t1, r0, r1, keep = tighten(sub, kappa, row_support)
             cols["t_begin"].append((s0 + t0) * CELL_S)
             cols["t_end"].append((s0 + t1) * CELL_S)
             cols["lo_khz"].append(ROW_EDGES_KHZ[r0])

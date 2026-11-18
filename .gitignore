@@ -48,6 +48,10 @@ anaconda_projects/
 # Derived outputs and the reviewer's own log
 data/insecta_compare/
 data/review/
+data/uploads/
 
 # Notebook / editor scratch
 .virtual_documents/
+
+# GBIF answers for scripts/build_common_names.py (rebuildable)
+data/common_names_gbif.jsonl

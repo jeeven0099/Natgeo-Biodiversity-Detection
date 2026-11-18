@@ -40,9 +40,14 @@ main { display: grid; grid-template-columns: 290px 1fr; gap: 12px; padding: 12px
 #list .st { font-weight: 700; text-align: center; }
 .st.yes { color: var(--yes); } .st.no { color: var(--no); } .st.unknown { color: var(--unk); }
 .small { font-size: 12px; color: var(--muted); }
+.cn { font-weight: normal; }
 #right { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 #specwrap { position: relative; }
 #spec { width: 100%; height: 440px; display: block; background: #000; border-radius: 4px; cursor: crosshair; touch-action: none; }
+#readout { position: absolute; top: 8px; right: 10px; padding: 2px 7px; border-radius: 4px; pointer-events: none;
+  background: rgba(0,0,0,.66); color: #f2f2f2; font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre; display: none; }
+a#editorLink { color: #8ab4ff; }
+#overview { width: 100%; height: 46px; display: block; margin-top: 4px; background: #111; border-radius: 4px; cursor: pointer; touch-action: none; }
 .bar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 8px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 1200px) { .grid2 { grid-template-columns: 1fr; } }
@@ -59,22 +64,36 @@ table.top td.k { width: 22px; color: var(--muted); }
 .chip b { cursor: pointer; color: var(--muted); }
 #sugg { position: absolute; z-index: 10; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; max-height: 260px; overflow-y: auto; width: 100%; display: none; }
 #sugg div { padding: 4px 8px; cursor: pointer; } #sugg div.hi, #sugg div:hover { background: var(--sel); }
-.num input { width: 78px; }
+#boxtxt { font-variant-numeric: tabular-nums; }
 textarea { width: 100%; min-height: 44px; padding: 5px; }
 .err { color: var(--no); }
 .hist { font-size: 12px; max-height: 120px; overflow-y: auto; }
 details summary { cursor: pointer; color: var(--muted); }
 kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+.tag { font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--sel); color: var(--muted); white-space: nowrap; }
+.hdrlab { font-weight: 600; margin-right: 2px; }
+#list .minhead { padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--sel); position: sticky; top: 0; z-index: 1; }
+#list .empty { padding: 10px; }
 </style>
 </head>
 <body>
 <header>
   <h1>Box review</h1>
   <label class="inl">Recording <select id="rec"></select></label>
+  <span class="inl" id="addWrap" title="add an audio file of your own: the zero-shot model detects calls on it, then it joins this list (stored in data/uploads; its answers are logged, the learners leave it out)">
+    <button id="addAudio">add audio…</button><input type="file" id="addFile" accept="audio/*,.wav,.flac,.ogg,.mp3,.aif,.aiff" hidden>
+    <span class="small" id="addstat"></span></span>
+  <label class="inl" title="show the recording a minute at a time; the list holds only that minute's boxes"><input type="checkbox" id="minuteMode"> minute view</label>
   <div class="lanes" id="lanes"></div>
+  <div class="lanes" id="sources" title="which kinds of item the list shows"></div>
   <label class="inl" title="cells kept at this share of the way from the box median to its max">κ <input id="kappa" type="number" step="0.05" min="0" max="1" style="width:64px"></label>
   <label class="inl">Reviewer <input id="reviewer" placeholder="your name" style="width:120px"></label>
   <span class="small" id="logstat"></span>
+  <span class="small" id="refinestat"></span>
+  <span class="inl" title="download this recording's reviewed boxes as a Raven selection table (.txt), from the log as it is now">
+    <button id="exportRaven">export Raven table</button>
+    <select id="exportKeep"><option value="yes">yes only</option><option value="all">every answer</option></select></span>
+  <a id="editorLink" href="/editor" target="_blank" rel="noopener" title="open, record and cut audio files of your own; nothing there is logged">audio editor ↗</a>
 </header>
 <main>
   <div class="card" id="list"></div>
@@ -83,7 +102,15 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
       <div class="bar" style="margin-top:0">
         <b id="title">–</b><span class="small" id="subtitle"></span>
       </div>
-      <div id="specwrap" style="margin-top:6px"><canvas id="spec"></canvas></div>
+      <div class="bar" id="minnav" style="display:none">
+        <button id="minPrev" title="previous minute ([ or PageUp)">◀ minute <kbd>[</kbd></button>
+        <b id="minlab"></b>
+        <button id="minNext" title="next minute (] or PageDown)">minute ▶ <kbd>]</kbd></button>
+        <button id="minFit" title="show the whole minute again">whole minute</button>
+        <span class="small">Every listed box of this minute is drawn: solid = logged, dashed = not yet, grey = no. Click one to open it; drag to box a call it misses.</span>
+      </div>
+      <div id="specwrap" style="margin-top:6px"><canvas id="spec"></canvas><div id="readout"></div></div>
+      <canvas id="overview" title="the whole recording: click or drag to move the view; in the minute view, click another minute to go to it"></canvas>
       <div class="bar">
         <button id="panL" title="pan left">◀</button><button id="zoomOut" title="zoom out">−</button>
         <button id="zoomIn" title="zoom in">+</button><button id="panR" title="pan right">▶</button>
@@ -91,12 +118,31 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
         <label class="inl">to <select id="fview"><option>4</option><option>8</option><option>12</option><option selected>16</option><option>24</option></select> kHz</label>
         <label class="inl"><input type="checkbox" id="showRaven" checked> Raven boxes</label>
         <label class="inl"><input type="checkbox" id="showCells" checked> kept cells</label>
-        <span class="small">Drag on the spectrogram to redraw the box.</span>
+        <button id="newbox" title="draw a box around a call the list does not have (B)">＋ new box <kbd>B</kbd></button>
+        <button id="cancelNew" style="display:none" title="back to the item you were on (Esc)">cancel new box</button>
+        <span class="small" id="drawhelp"><b>Draw the box:</b> drag on the spectrogram. Drag an edge or corner of the yellow box to adjust it.</span>
       </div>
       <div class="bar">
+        <label class="inl" title="higher shows fainter sounds">brightness <input type="range" id="bright" min="0" max="100" value="50"></label>
+        <label class="inl" title="higher: fewer dB from quiet to loud, so faint and loud separate more">contrast <input type="range" id="contrast" min="0" max="100" value="50"></label>
+        <label class="inl">colours <select id="cmap"><option value="grey">grey</option><option value="grey dark">grey, dark</option>
+          <option value="viridis">viridis</option><option value="magma">magma</option></select></label>
+        <label class="inl" title="STFT window: shorter = sharper in time (clicks, pulses), longer = sharper in frequency (whistles)">window
+          <select id="nfft"><option>256</option><option>512</option><option selected>1024</option><option>2048</option><option>4096</option></select> points</label>
+        <button id="dispReset" title="brightness 50, contrast 50, grey, 1024 points">reset</button>
+        <span class="small" id="dispnote"></span>
+      </div>
+      <div class="bar">
+        <button id="playView" title="play the view from the cursor to its end, all frequencies; click the time axis to move the cursor (P)">▶ play view <kbd>P</kbd></button>
         <button id="play" class="primary">▶ play box</button><button id="stop">■</button>
-        <label class="inl">Play <select id="mode"><option>original</option><option>band-passed</option><option>cell mask</option></select></label>
-        <label class="inl">pad <select id="pad"><option>0</option><option selected>0.5</option><option>1</option><option>2</option></select> s</label>
+        <label class="inl" title="slower plays lower, as on tape: at ¼× an 8 kHz call sounds at 2 kHz">speed
+          <select id="speed"><option value="2">2×</option><option value="1" selected>1×</option><option value="0.5">½×</option>
+          <option value="0.25">¼×</option><option value="0.125">⅛×</option></select></label>
+        <label class="inl">Play <select id="mode">
+          <option value="band-passed" selected>the box only (its time and band)</option>
+          <option value="original">the box's time, all frequencies</option>
+          <option value="cell mask">kept cells inside the box</option></select></label>
+        <label class="inl"><input type="checkbox" id="autoplay" checked> play when drawn</label>
         <span class="small" id="playnote"></span>
         <audio id="audio"></audio>
       </div>
@@ -113,23 +159,24 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
           <div id="sugg"></div>
         </div>
       </div>
-      <div class="card">
+      <div class="card" id="deccard">
+        <div class="bar" id="lanerow" style="margin-top:0; margin-bottom:6px; display:none">
+          <b>Group</b> <select id="lanepick"></select><span class="small" id="lanenote"></span>
+        </div>
         <b>Is there a sound of this box's group in the box?</b>
         <div class="bar dec">
           <button data-d="yes" class="yes">Yes <kbd>Y</kbd></button>
           <button data-d="no" class="no">No <kbd>N</kbd></button>
           <button data-d="unknown" class="unknown">Unknown <kbd>U</kbd></button>
         </div>
-        <div class="bar num">
-          <b>Box</b>
-          <label class="inl">from <input id="b0" type="number" step="0.01"> s</label>
-          <label class="inl">to <input id="b1" type="number" step="0.01"> s</label>
-          <label class="inl"><input id="f0" type="number" step="0.01"> –</label>
-          <label class="inl"><input id="f1" type="number" step="0.01"> kHz</label>
-        </div>
         <div class="bar">
-          <button id="resetTight">tightened box</button><button id="resetFull">model box</button>
-          <button id="repredict" title="top 5 for the box as drawn now">top 5 for this box</button>
+          <b>Box</b> <span id="boxtxt">–</span>
+          <span class="small">(drawn on the spectrogram)</span>
+          <button id="repredict" title="rerun the model's top 5 on the box as drawn now">top 5 for this box</button>
+        </div>
+        <div class="bar" id="resetbar">
+          <span class="small">Reset to</span>
+          <button id="resetRefined" style="display:none">refined box</button><button id="resetTight">tightened box</button><button id="resetFull">model box</button>
           <span class="small" id="edited"></span>
         </div>
         <div style="margin-top:8px"><textarea id="comment" placeholder="comment (optional)"></textarea></div>
@@ -142,7 +189,30 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
         <details style="margin-top:6px"><summary>Keys</summary><div class="small">
           <kbd>Y</kbd>/<kbd>N</kbd>/<kbd>U</kbd> decision · <kbd>1</kbd>–<kbd>5</kbd> tick a top-5 name ·
           <kbd>Space</kbd> play/stop · <kbd>←</kbd>/<kbd>→</kbd> previous/next box · <kbd>J</kbd> next unreviewed ·
-          <kbd>Ctrl+Enter</kbd> accept. Keys do nothing while you type in a field.</div></details>
+          <kbd>B</kbd> new box · <kbd>Esc</kbd> cancel the new box ·
+          <kbd>[</kbd>/<kbd>]</kbd> (or <kbd>PgUp</kbd>/<kbd>PgDn</kbd>) previous/next minute ·
+          <kbd>Ctrl+Enter</kbd> accept. Keys do nothing while you type in a field.<br>
+          On the spectrogram: <b>wheel</b> zooms in time about the mouse · <kbd>Shift</kbd>+wheel pans ·
+          <kbd>Shift</kbd>+drag or middle-button drag pans · the box at the top right reads the time, frequency
+          and level under the mouse. The strip below shows the whole recording: click or drag it to move the view.</div></details>
+      </div>
+      <div class="card" id="auditcard" style="display:none">
+        <b>Audit window: give every call a box</b>
+        <div class="small" style="margin-top:4px">Listen to the whole window. Drag on the spectrogram around each call
+          you hear, of any group, then pick its group and log it; you come back here after each one.
+          The model's boxes are hidden in this window so they do not steer you. When every call of the
+          ticked groups has a box, press <i>Complete</i>. These windows were picked at random, so they are
+          the only place where the model's recall can be measured fairly.</div>
+        <div style="margin-top:8px"><b>Your boxes in this window</b><div id="auditboxes" class="small"></div></div>
+        <div style="margin-top:8px"><b>Groups whose every call has a box</b><div class="lanes" id="auditgroups"></div></div>
+        <div style="margin-top:8px"><textarea id="auditcomment" placeholder="comment (optional)"></textarea></div>
+        <div class="bar">
+          <button id="auditDone" class="primary">Complete: every call is marked</button>
+          <button id="auditSkip" title="too noisy or too busy to mark every call">Skip: cannot mark it all</button>
+          <label class="inl"><input type="checkbox" id="auditAdvance" checked> then next</label>
+          <span id="auditmsg" class="small"></span>
+        </div>
+        <details style="margin-top:6px"><summary>History of this window</summary><div class="hist" id="audithist"></div></details>
       </div>
     </div>
   </div>
@@ -161,134 +231,524 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", 
 const store = {get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
                set(k, v) { try { localStorage.setItem(k, v); } catch {} }};
 
-let META = null, BOXES = [], cur = -1, BOX = null, PRED = null, RAVEN = [];
+let META = null, ALL = [], BOXES = [], cur = -1, BOX = null, PRED = null, RAVEN = [];
+let PARENT = null, predSeq = 0;   // PARENT: the item to return to after a new box
 let view = [0, 10], img = null, imgView = null, fmaxPng = 24;
 let acc = null;                 // accepted box [t0, t1, lo, hi]
 let decision = "", species = [];   // species: {name, source}
 let clipStart = 0, drag = null;
+let playing = "", playEnd = 0;  // what the audio element holds: "view", "box" or ""; where a view clip ends
+let cursor = null;              // {rec, t}: where 'play view' starts (set on the time axis)
+let MIN = 0;                    // minute view: the minute shown, 0-based
 
 // ---------------- setup ----------------
 async function init() {
   META = await api("/api/meta");
+  loadDisplay();
   $("kappa").value = store.get("kappa", META.kappa);
   $("reviewer").value = store.get("reviewer", "");
-  const on = JSON.parse(store.get("lanes", "null") || "null") || META.default_on;
+  $("minuteMode").checked = store.get("minuteMode", "1") === "1";
+  const on =JSON.parse(store.get("lanes", "null") || "null") || META.default_on;
   $("lanes").innerHTML = META.lanes.map(g =>
     `<label><input type="checkbox" value="${g}" ${on.includes(g) ? "checked" : ""}><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${g} <span class="small">≥${META.thresholds[g]}</span></label>`).join("");
+  const son = JSON.parse(store.get("sources", "null") || "null") || META.default_sources;
+  $("sources").innerHTML = `<span class="hdrlab">Show</span>` + Object.entries(META.sources).map(([s, label]) =>
+    `<label><input type="checkbox" value="${s}" ${son.includes(s) ? "checked" : ""}>${label}</label>`).join("");
+  $("auditgroups").innerHTML = META.audit_groups.map(g =>
+    `<label><input type="checkbox" value="${g}" checked><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${g}</label>`).join("");
+  $("lanepick").innerHTML = `<option value="">pick the group …</option>` + META.lanes.map(g => `<option value="${g}">${g}</option>`).join("");
   fillRecs();
-  $("rec").value = store.get("rec", META.recordings[0].id);
+  $("addWrap").hidden = !META.can_add;
+  // ?rec= (the editor's link to a file it added) opens that recording once, then leaves the address
+  const want = new URLSearchParams(location.search).get("rec");
+  if (want != null) history.replaceState(null, "", location.pathname);
+  const wanted = want && META.recordings.some(r => r.id === want);
+  if (want && !wanted) $("addstat").innerHTML = `<span class="err">${esc(want)} is not in the list (yet)</span>`;
+  $("rec").value = wanted ? want : store.get("rec", META.recordings[0].id);
   if (!$("rec").value) $("rec").value = META.recordings[0].id;
   logStat();
-  await loadRec(+store.get("boxn", 0));
+  resumeScans();
+  await loadRec(wanted ? "" : store.get("boxid", ""));
 }
 function lanesOn() { return [...$("lanes").querySelectorAll("input:checked")].map(x => x.value); }
+function sourcesOn() { return [...$("sources").querySelectorAll("input:checked")].map(x => x.value); }
 function fillRecs() {
   const on = lanesOn(), v = $("rec").value;
   $("rec").innerHTML = META.recordings.map(r => {
     const n = on.reduce((s, g) => s + (r.counts[g] || 0), 0);
-    return `<option value="${r.id}">${r.id} · ${n} boxes${r.reviewed ? ` · ${r.reviewed} logged` : ""}</option>`;
+    const add = r.added ? ` · added${r.added.name !== r.id ? ` (${r.added.name})` : ""}` : "";
+    return `<option value="${r.id}">${esc(r.id)}${esc(add)} · ${n} model boxes${r.reviewed ? ` · ${r.reviewed} logged` : ""}</option>`;
   }).join("");
   if (v) $("rec").value = v;
 }
-function logStat() { $("logstat").textContent = `${META.n_logged} rows in ${META.log_file}`; }
+function logStat() {
+  $("logstat").textContent = `${META.n_logged} rows in ${META.log_file} · ${META.n_audit_complete} audit windows complete`;
+}
+// ---------------- minute view ----------------
+const minuteMode = () => $("minuteMode").checked;
+const recInfo = () => META.recordings.find(r => r.id === $("rec").value) || META.recordings[0];
+const recDur = () => recInfo().duration_s;
+const nMinutes = () => Math.max(1, Math.ceil(recDur() / META.minute_s - 1e-9));
+const minuteRange = (m = MIN) => [m * META.minute_s, Math.min(recDur(), (m + 1) * META.minute_s)];
+// the seconds an item covers: its own span and, once logged, the accepted box (a merge can be wider)
+const spanOf = b => b.acc ? [Math.min(b.begin_s, b.acc[0]), Math.max(b.end_s, b.acc[1])] : [b.begin_s, b.end_s];
+const minuteOf = b => Math.max(0, Math.min(nMinutes() - 1, Math.floor(Math.max(0, spanOf(b)[0]) / META.minute_s)));
+function inMinute(b, m = MIN) { const [a, e] = minuteRange(m), [s0, s1] = spanOf(b); return s0 < e && s1 > a; }
+// the box drawn for an item in the minute view: the accepted box once logged, else the box it opens on
+const rectOf = b => b.acc || [b.t_begin, b.t_end, b.lo_khz, b.hi_khz];
+function minuteLabel() {
+  const [a, e] = minuteRange();
+  return `minute ${MIN + 1} of ${nMinutes()} · ${secs0(a)}–${secs0(e)}`;
+}
+function secs0(t) { const m = Math.floor(t / 60), s = Math.round(t - 60 * m); return `${m}:${String(s).padStart(2, "0")}`; }
+// a view inside the minute that already holds the box is kept (you may have zoomed in); else the whole minute
+function viewFor(d) {
+  if (!minuteMode()) return d.view;
+  const M = minuteRange(), s = d.source === "audit" ? [d.begin_s, d.end_s] : [d.t_begin, d.t_end];
+  const inside = view[0] >= M[0] - 1e-6 && view[1] <= M[1] + 1e-6 && imgView && $("rec").value === d.recording;
+  return inside && s[0] >= view[0] && s[1] <= view[1] ? view.slice() : M;
+}
+async function gotoMinute(m, startId = "") {
+  m = Math.max(0, Math.min(nMinutes() - 1, m));
+  MIN = m; store.set("minute", `${$("rec").value}|${m}`);
+  stopAudio();
+  BOXES = filterBoxes(); cur = -1; renderList();
+  if (!BOXES.length) return emptyMinute();
+  const i = BOXES.findIndex(b => b.id === startId);
+  const open = BOXES.findIndex(b => b.source === "audit" ? !b.status : !b.decision);
+  await select(i >= 0 ? i : open >= 0 ? open : 0);
+}
+// nothing listed in this minute: the spectrogram still shows, and a drag there starts a new box
+function emptyMinute() {
+  BOX = null; PRED = null; acc = null; decision = ""; species = []; predSeq++; selSeq++;
+  const ri = recInfo();
+  fmaxPng = ri.fmax_khz;
+  showCard(false);
+  $("title").textContent = `${minuteLabel()} · ${ri.id}`;
+  $("subtitle").textContent = " nothing listed in this minute: drag on the spectrogram around a call to add it";
+  $("lanerow").style.display = "none"; $("resetbar").style.display = "none";
+  $("topwrap").innerHTML = `<span class="small">Draw a box to see the model's top 5.</span>`;
+  $("allwrap").style.display = "none"; $("scorename").textContent = "";
+  $("hist").innerHTML = ""; $("msg").textContent = ""; $("comment").value = "";
+  syncFields(); renderDecision(); renderChips(); minNav();
+  setView(minuteRange());
+}
+function minNav() {
+  $("minnav").style.display = minuteMode() ? "" : "none";
+  if (!minuteMode()) return;
+  $("minlab").textContent = minuteLabel();
+  $("minPrev").disabled = MIN <= 0; $("minNext").disabled = MIN >= nMinutes() - 1;
+}
+$("minPrev").onclick = () => gotoMinute(MIN - 1);
+$("minNext").onclick = () => gotoMinute(MIN + 1);
+$("minFit").onclick = () => setView(minuteRange());
+$("minuteMode").onchange = () => { store.set("minuteMode", minuteMode() ? "1" : "0"); loadRec(curId()); };
 
-async function loadRec(startN) {
+const isAudit = () => BOX && BOX.source === "audit";
+const needsLane = () => BOX && (BOX.new || BOX.lane_editable);
+const predictorOf = lane => lane.startsWith("EC-") ? "EarthChirp" : "Perch";
+
+// minute: the minute to show (minute view); left out, the minute of startId, else the one last shown
+// only the latest load applies: ticking several groups starts several, and a slow earlier one would
+// otherwise land last and reopen its own minute and box (recWait: loads in flight, for the tests)
+let recSeq = 0, recWait = 0;
+async function loadRec(startId, minute) {
+  const seq = ++recSeq;
   store.set("rec", $("rec").value);
-  const all = await api(`/api/boxes?rec=${encodeURIComponent($("rec").value)}&kappa=${$("kappa").value}`);
-  const on = lanesOn();
-  BOXES = all.filter(b => on.includes(b.lane));
+  let all;
+  recWait++;
+  try { all = await api(`/api/boxes?rec=${encodeURIComponent($("rec").value)}&kappa=${$("kappa").value}`); }
+  finally { recWait--; }
+  if (seq !== recSeq) return;
+  ALL = all;
+  loadRavenAll($("rec").value);
+  scheduleRefine();
+  if (minuteMode()) {
+    // the minute last shown is kept while the box (if any) lies in it: a tick never jumps to a long box's start
+    const it = ALL.find(b => b.id === startId);
+    const [r, m] = (store.get("minute", "") || "").split("|"), last = r === $("rec").value ? +m || 0 : null;
+    const pick = minute != null ? minute : last != null && (!it || inMinute(it, last)) ? last : it ? minuteOf(it) : 0;
+    return gotoMinute(pick, startId);
+  }
+  minNav();
+  BOXES = filterBoxes();
+  cur = -1;
   renderList();
-  if (!BOXES.length) { cur = -1; $("title").textContent = "no boxes in the chosen lanes"; return; }
-  let i = BOXES.findIndex(b => b.n === startN);
+  if (!BOXES.length) { BOX = null; $("title").textContent = "nothing to review: tick more groups or sources"; $("subtitle").textContent = ""; return; }
+  const i = BOXES.findIndex(b => b.id === startId);
   await select(i >= 0 ? i : 0);
+}
+// the "box uncertain" source adds model / below-threshold boxes the refiner cannot settle;
+// ticked alone, the least confident come first. "taxon check" adds the taxon head's finds and the
+// model boxes it doubts; ticked alone, the most doubtful first
+// listed: the ticked groups and sources, whatever the minute (the overview strip draws these)
+function listed() {
+  const on = lanesOn(), so = sourcesOn();
+  return ALL.filter(b => (so.includes(b.source) || (so.includes("uncertain") && b.uncertain)
+                          || (so.includes("taxon") && b.taxon_doubt))
+                         && (b.source === "audit" || !b.lane || on.includes(b.lane)));
+}
+function filterBoxes() {
+  const so = sourcesOn(), out = listed().filter(b => !minuteMode() || inMinute(b));
+  if (so.length === 1 && so[0] === "uncertain") out.sort((a, b) => (a.refine_conf ?? 2) - (b.refine_conf ?? 2));
+  if (so.length === 1 && so[0] === "taxon") out.sort((a, b) => (b.source === "taxon") - (a.source === "taxon")
+    || (a.source === "taxon" ? b.taxon_p - a.taxon_p : a.taxon_p - b.taxon_p));
+  return out;
+}
+// the server refines a recording's boxes in the background: refresh confidence until it is done
+let refineTimer = null;
+function scheduleRefine() {
+  clearTimeout(refineTimer);
+  const todo = ALL.filter(b => b.refine_pending).length, all = ALL.filter(b => b.refine_pending || b.refine_conf != null).length;
+  $("refinestat").textContent = !META.refiner ? "" : todo ? `refining boxes ${all - todo}/${all} …`
+    : `refiner: ${META.refiner.adopted.length ? "refined boxes for " + META.refiner.adopted.join(", ") : "none adopted yet"}`;
+  if (todo) refineTimer = setTimeout(refreshRefine, 3000);
+}
+async function refreshRefine() {
+  const rec = $("rec").value, kap = $("kappa").value;
+  let fresh;
+  try { fresh = await api(`/api/boxes?rec=${encodeURIComponent(rec)}&kappa=${kap}`); } catch { return scheduleRefine(); }
+  if (rec !== $("rec").value || kap !== $("kappa").value) return;
+  const by = new Map(fresh.map(b => [b.id, b]));
+  ALL.forEach(b => { const f = by.get(b.id); if (f) Object.assign(b, {uncertain: f.uncertain, refine_conf: f.refine_conf, refine_pending: f.refine_pending}); });
+  if (sourcesOn().includes("uncertain")) {
+    const id = curId(); BOXES = filterBoxes(); cur = BOXES.findIndex(b => b.id === id); renderList();
+    if (BOX === null && BOXES.length) select(0);
+  }
+  scheduleRefine();
+}
+function tagOf(b) {
+  return ({model: "", near: `<span class="tag">below threshold</span>`, raven: `<span class="tag">Raven: ${esc(b.label)}</span>`,
+          reviewer: `<span class="tag">your box</span>`, audit: `<span class="tag">audit ${fmt(b.end_s - b.begin_s, 0)} s</span>`,
+          taxon: `<span class="tag" title="the taxon head finds this group here; no model box covers it">taxon head ${esc(b.label)}</span>`}[b.source] || "")
+    + (b.uncertain ? ` <span class="tag" title="refiner confidence ${fmt(b.refine_conf, 2)}">box uncertain</span>` : "")
+    + (b.taxon_doubt ? ` <span class="tag" title="the taxon head doubts this group here (p=${fmt(b.taxon_p, 2)})">taxon doubt</span>` : "");
 }
 function renderList() {
   const mark = {yes: "✓", no: "✗", unknown: "?"};
-  $("list").innerHTML = BOXES.map((b, i) =>
-    `<div class="row${i === cur ? " cur" : ""}" data-i="${i}">
-       <span class="st ${b.decision}">${mark[b.decision] || "·"}</span>
-       <span><span class="sw" style="background:${META.colors[b.lane] || "#888"}"></span> ${b.lane}
+  const open = BOXES.filter(b => b.source === "audit" ? !b.status : !b.decision).length;
+  const head = !minuteMode() ? "" : `<div class="minhead"><b>${minuteLabel()}</b><br><span class="small">${BOXES.length} listed · ${open} not reviewed</span></div>`
+    + (BOXES.length ? "" : `<div class="empty small">No listed boxes in this minute. Look for calls on the spectrogram and drag around any you find; tick more groups or sources to list more.</div>`);
+  $("list").innerHTML = head + BOXES.map((b, i) => {
+    const st = b.source === "audit" ? ({complete: "yes", skipped: "unknown"}[b.status] || "") : b.decision;
+    const sym = b.source === "audit" ? ({complete: "✓", skipped: "–"}[b.status] || "·") : mark[b.decision] || "·";
+    const name = b.source === "audit" ? "audit window" : b.lane || `<i>group?</i>`;
+    return `<div class="row${i === cur ? " cur" : ""}" data-i="${i}">
+       <span class="st ${st}">${sym}</span>
+       <span>${b.source === "audit" ? "" : `<span class="sw" style="background:${META.colors[b.lane] || "#888"}"></span>`} ${name} ${tagOf(b)}
          <span class="small">#${b.n} ${fmt(b.begin_s, 1)}–${fmt(b.end_s, 1)} s</span>
-         ${b.species ? `<br><span class="small">${esc(b.species)}</span>` : ""}</span>
-       <span class="small">${fmt(b.max_score, 3)}</span></div>`).join("");
+         ${b.species ? `<br><span class="small">${esc(b.species)}</span>` : ""}
+         ${b.source === "audit" && b.groups ? `<br><span class="small">complete for ${esc(b.groups)}</span>` : ""}</span>
+       <span class="small">${b.max_score == null ? "" : fmt(b.max_score, 3)}</span></div>`;
+  }).join("");
   const el = $("list").querySelector(".cur");
   if (el) el.scrollIntoView({block: "nearest"});
 }
+function showCard(audit) {
+  $("deccard").style.display = audit ? "none" : "";
+  $("auditcard").style.display = audit ? "" : "none";
+  $("addsp").disabled = audit;
+  $("newbox").style.display = BOX && BOX.new ? "none" : "";
+  $("cancelNew").style.display = BOX && BOX.new ? "" : "none";
+  $("drawhelp").innerHTML = audit ? "<b>Audit:</b> drag around a call to give it a box."
+    : BOX && BOX.new ? "<b>New box:</b> drag around the call, pick its group, Accept. <kbd>Esc</kbd> cancels."
+    : !BOX ? "<b>Missed call?</b> drag around it on the spectrogram to give it a box."
+    : minuteMode() ? "<b>Edit the box:</b> drag an edge or corner of the yellow box, or drag inside it to redraw it. A drag begun outside it boxes a new call."
+    : "<b>Draw the box:</b> drag on the spectrogram. Drag an edge or corner of the yellow box to adjust it.";
+}
+function setupLane() {
+  $("lanerow").style.display = needsLane() ? "" : "none";
+  if (!needsLane()) return;
+  $("lanepick").value = BOX.lane || "";
+  $("lanenote").textContent = BOX.new ? " the group of the call you box"
+    : BOX.source === "raven" ? ` Raven says ${BOX.label}; change it if the call is another group` : " change it if the call is another group";
+}
+$("lanepick").onchange = () => {
+  BOX.lane = $("lanepick").value; BOX.predictor = BOX.lane ? predictorOf(BOX.lane) : null;
+  if (BOX.new && BOX.lane) store.set("newlane", BOX.lane);
+  setTitle(); renderDecision(); draw(); predict();
+};
+function setTitle() {
+  if (BOX.new) { $("title").textContent = `New box · ${BOX.recording}`; return; }
+  $("title").textContent = `${BOX.lane || "group?"} #${BOX.n} · ${BOX.recording}`;
+}
+function subtitle() {
+  const sc = BOX.max_score == null ? "–" : fmt(BOX.max_score, 3);
+  const tight = BOX.tightened ? ` · tightened ${fmt(BOX.t_begin)}–${fmt(BOX.t_end)} s, ${fmt(BOX.lo_khz)}–${fmt(BOX.hi_khz)} kHz` : " · no cell map: full band";
+  if (BOX.source === "model") return ` model box ${fmt(BOX.begin_s, 1)}–${fmt(BOX.end_s, 1)} s, max score ${sc} (threshold ${BOX.threshold})` + tight;
+  if (BOX.source === "near") return ` below threshold: ${fmt(BOX.begin_s, 1)}–${fmt(BOX.end_s, 1)} s, max score ${sc} (threshold ${BOX.threshold}; this band starts at ${fmt(META.near_low[BOX.lane], 4)})` + tight;
+  if (BOX.source === "raven") return ` Raven box “${BOX.label}” ${fmt(BOX.begin_s)}–${fmt(BOX.end_s)} s, ${fmt(BOX.lo_khz)}–${fmt(BOX.hi_khz)} kHz: not matched to a model box of its group (time IoU ≥ 0.3)` +
+    (BOX.lane ? ` (max ${BOX.lane} score here ${sc})` : "");
+  return ` your box ${fmt(BOX.t_begin)}–${fmt(BOX.t_end)} s, ${fmt(BOX.lo_khz)}–${fmt(BOX.hi_khz)} kHz (max ${BOX.lane} score here ${sc})`;
+}
+function refineNote() {
+  if (BOX.refine_conf == null) return "";
+  if (!BOX.refinable) return " · refiner: box too long to refine";
+  return ` · refiner confidence ${fmt(BOX.refine_conf, 2)}${BOX.uncertain ? " (box uncertain)" : ""}` +
+    (BOX.refined ? " · opened on the refined box (dotted)" : "");
+}
 
 // ---------------- one box ----------------
+let selSeq = 0;
 async function select(i) {
   if (i < 0 || i >= BOXES.length) return;
   stopAudio();
   $("playnote").textContent = "";
-  cur = i; renderList();
-  store.set("boxn", BOXES[i].n);
-  const kap = $("kappa").value;
-  BOX = await api(`/api/box?id=${encodeURIComponent(BOXES[i].id)}&kappa=${kap}`);
+  cur = i; PARENT = null; renderList();
+  store.set("boxid", BOXES[i].id);
+  const kap = $("kappa").value, seq = ++selSeq;
+  const box = await api(`/api/box?id=${encodeURIComponent(BOXES[i].id)}&kappa=${kap}`);
+  if (seq !== selSeq) return;            // a later pick (] pressed again, another click) wins
+  BOX = box;
   fmaxPng = BOX.fmax_khz;
-  $("title").textContent = `${BOX.lane} #${BOX.n} · ${BOX.recording}`;
-  $("subtitle").textContent = ` model box ${fmt(BOX.begin_s, 1)}–${fmt(BOX.end_s, 1)} s, max score ${fmt(BOX.max_score, 3)} (threshold ${BOX.threshold})` +
-    (BOX.tightened ? ` · tightened ${fmt(BOX.t_begin)}–${fmt(BOX.t_end)} s, ${fmt(BOX.lo_khz)}–${fmt(BOX.hi_khz)} kHz` : " · no cell map: full band");
+  if (BOX.source === "audit") return showAudit();
+  showCard(false);
   const L = BOX.latest;
+  if (L && BOX.lane_editable) { BOX.lane = L.lane; BOX.predictor = predictorOf(L.lane); }
+  setTitle(); setupLane();
+  $("subtitle").textContent = subtitle() + refineNote();
+  $("resetbar").style.display = "";
+  $("resetTight").textContent = {model: "tightened box", near: "tightened box", raven: "Raven box", reviewer: "box as first drawn"}[BOX.source];
+  $("resetFull").style.display = BOX.source === "model" || BOX.source === "near" ? "" : "none";
+  $("resetRefined").style.display = BOX.refined ? "" : "none";
   if (L) {
     decision = L.decision;
     const names = L.species ? L.species.split("; ") : [], src = L.species_source ? L.species_source.split("; ") : [];
-    species = names.map((n, k) => ({name: n, source: src[k] || "added"}));
+    species = names.map((n, k) => ({name: n, source: src[k] || "added", common: (BOX.common || {})[n] || ""}));
     acc = [+L.accepted_begin_s, +L.accepted_end_s, +L.accepted_lo_khz, +L.accepted_hi_khz];
     $("comment").value = L.comment || "";
   } else {
     decision = ""; species = [];
-    acc = [BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz];
+    // the box the server logs as shown: refined when the refiner is confident, else the tightened box
+    acc = BOX.start_box && BOX.start_box.length === 4 ? BOX.start_box.slice() : [BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz];
     $("comment").value = "";
   }
   $("hist").innerHTML = BOX.history.length ? BOX.history.map(h =>
     `<div>${esc(h.logged_at)} · ${esc(h.reviewer || "–")} · <b>${esc(h.decision)}</b> · ${esc(h.species || "no species")} · ${fmt(h.accepted_begin_s)}–${fmt(h.accepted_end_s)} s ${fmt(h.accepted_lo_khz)}–${fmt(h.accepted_hi_khz)} kHz${h.comment ? " · " + esc(h.comment) : ""}</div>`).join("")
     : "not logged yet";
   $("msg").textContent = L ? "already logged: shown as last accepted; Accept again to add a new row" : "";
-  syncFields(); renderDecision(); renderChips();
-  setView(BOX.view);
+  syncFields(); renderDecision(); renderChips(); minNav();
+  setView(viewFor(BOX));
   predict();
 }
-function setView(v) {
-  const d = BOX.duration_s;
-  let [a, b] = v; const w = Math.min(b - a, 120);
+
+// ---------------- audit window ----------------
+function showAudit() {
+  showCard(true);
+  $("title").textContent = `Audit window #${BOX.n} · ${BOX.recording}`;
+  $("subtitle").textContent = ` ${fmt(BOX.begin_s, 1)}–${fmt(BOX.end_s, 1)} s, picked at random · model boxes hidden here`;
+  decision = ""; species = []; PRED = null;
+  acc = [BOX.begin_s, BOX.end_s, BOX.lo_khz, BOX.hi_khz];     // ▶ plays the whole window
+  $("topwrap").innerHTML = `<span class="small">Drag around a call to give it a box; its top 5 shows then.</span>`;
+  $("allwrap").style.display = "none"; $("scorename").textContent = "";
+  renderChips();
+  const L = BOX.latest, done = L && L.status === "complete" ? L.groups.split("; ") : META.audit_groups;
+  $("auditgroups").querySelectorAll("input").forEach(x => { x.checked = done.includes(x.value); });
+  $("auditcomment").value = L ? L.comment || "" : "";
+  $("audithist").innerHTML = BOX.history.length ? BOX.history.map(h =>
+    `<div>${esc(h.logged_at)} · ${esc(h.reviewer || "–")} · <b>${esc(h.status)}</b>${h.groups ? " for " + esc(h.groups) : ""} · ${esc(h.n_reviewer_boxes)} boxes${h.comment ? " · " + esc(h.comment) : ""}</div>`).join("")
+    : "not closed yet";
+  $("auditmsg").textContent = L ? `already ${L.status}; pressing again adds a new row` : "";
+  renderAuditBoxes(); minNav();
+  setView(viewFor(BOX));
+}
+const auditWin = () => isAudit() ? [BOX.begin_s, BOX.end_s] : BOX && BOX.audit_window;
+function renderAuditBoxes() {
+  const [a, b] = [BOX.begin_s, BOX.end_s];
+  const mine = ALL.filter(x => x.source === "reviewer" && x.acc && x.acc[0] < b && x.acc[1] > a);
+  $("auditboxes").innerHTML = mine.length ? mine.map(x =>
+    `<div><span class="sw" style="background:${META.colors[x.lane] || "#888"}"></span> ${esc(x.lane)} · ${fmt(x.acc[0])}–${fmt(x.acc[1])} s, ${fmt(x.acc[2])}–${fmt(x.acc[3])} kHz · <b>${esc(x.decision)}</b>${x.species ? " · " + esc(x.species) : ""}</div>`).join("")
+    : "none yet";
+}
+async function closeAudit(status) {
+  if (!isAudit()) return;
+  const groups = [...$("auditgroups").querySelectorAll("input:checked")].map(x => x.value);
+  try {
+    const row = await api("/api/audit", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({id: BOX.id, kappa: +$("kappa").value, reviewer: $("reviewer").value, status, groups,
+                            comment: $("auditcomment").value})});
+    const it = BOXES[cur];
+    META.n_audit_complete += (row.status === "complete") - (it.status === "complete");
+    it.status = row.status; it.groups = row.groups;
+    logStat(); renderList();
+    $("auditmsg").textContent = `window ${row.status}${row.groups ? " for " + row.groups : ""} (${row.n_reviewer_boxes} of your boxes in it)`;
+    if ($("auditAdvance").checked) nextUnreviewed();
+  } catch (e) { $("auditmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+$("auditDone").onclick = () => closeAudit("complete");
+$("auditSkip").onclick = () => closeAudit("skipped");
+
+// ---------------- new box (one the list does not have) ----------------
+function startNew() {
+  if (BOX ? BOX.new : !minuteMode()) return;
+  const ri = recInfo();          // an empty minute has no box to start from
+  const base = BOX || {recording: ri.id, duration_s: ri.duration_s, fmax_khz: ri.fmax_khz, source: "", audit_window: null};
+  PARENT = BOXES[cur] ? BOXES[cur].id : null;
+  stopAudio(); $("playnote").textContent = "";
+  let lane = store.get("newlane", "");
+  if (!META.lanes.includes(lane)) lane = "";
+  selSeq++;                              // a pick still loading must not replace the new box
+  BOX = {new: true, id: "new", source: "reviewer", model: "reviewer", recording: base.recording, lane,
+         predictor: lane ? predictorOf(lane) : null, lane_editable: true, n: 0, view: view.slice(),
+         duration_s: base.duration_s, fmax_khz: base.fmax_khz, history: [], latest: null, kept_rects: [],
+         tightened: false, audit_window: base.source === "audit" ? [base.begin_s, base.end_s] : base.audit_window || null};
+  decision = "yes"; species = []; acc = null; PRED = null; predSeq++;
+  showCard(false); setTitle(); setupLane();
+  $("subtitle").textContent = " a box the list does not have: drag around the call, pick its group, Accept";
+  $("resetbar").style.display = "none";
+  $("topwrap").innerHTML = `<span class="small">Draw the box to see the model's top 5.</span>`;
+  $("allwrap").style.display = "none"; $("scorename").textContent = "";
+  $("comment").value = ""; $("hist").innerHTML = "new box";
+  $("msg").textContent = "";
+  syncFields(); renderDecision(); renderChips(); draw();
+}
+function cancelNew() {
+  if (!BOX || !BOX.new) return;
+  const i = BOXES.findIndex(b => b.id === PARENT);
+  if (i >= 0) select(i); else if (minuteMode()) gotoMinute(MIN); else loadRec(PARENT);
+}
+$("newbox").onclick = startNew;
+$("cancelNew").onclick = cancelNew;
+
+const viewRec = () => BOX ? BOX.recording : $("rec").value;
+let specKey = "";               // the recording, range and window the image (and Raven boxes) were asked for
+const specKeyNow = () => `${viewRec()}|${view[0]}|${view[1]}|${$("nfft").value}`;
+// lazy (wheel, drags): the view moves at once over the image already loaded, and the new image is
+// asked for only once the view has rested LAZY_MS, not once per wheel step
+const MIN_W = 0.5, MAX_W = 120, LAZY_MS = 150;
+let lazyTimer = 0;
+function setView(v, lazy = false) {
+  const d = BOX ? BOX.duration_s : recDur();
+  let [a, b] = v; const w = Math.min(b - a, MAX_W);
   if (a < 0) { a = 0; } if (a + w > d) a = Math.max(0, d - w);
   view = [a, Math.min(d, a + w)];
+  if (playing === "view" && !au.paused) {                 // the view moved away from what is playing
+    const t = clipStart + au.currentTime;
+    if (t < view[0] || t > view[1]) stopAudio();
+  }
+  clearTimeout(lazyTimer);
+  if (specKeyNow() === specKey) return draw();            // same range and window: no reload
+  if (lazy) { draw(); lazyTimer = setTimeout(() => { if (specKeyNow() !== specKey) loadSpec(); }, LAZY_MS); return; }
   loadSpec();
 }
+// zoom by `factor` (> 1 out) keeping time t where it is on screen
+function zoomAbout(t, factor, lazy = true) {
+  const w = view[1] - view[0], d = BOX ? BOX.duration_s : recDur();
+  const nw = Math.max(MIN_W, Math.min(MAX_W, d, w * factor));
+  if (Math.abs(nw - w) < 1e-9) return;
+  const a = t - (t - view[0]) * nw / w;
+  setView([a, a + nw], lazy);
+}
 async function loadSpec() {
-  const [a, b] = view, rec = BOX.recording;
-  const want = `${rec}|${a}|${b}`;
+  const [a, b] = view, rec = viewRec(), n = $("nfft").value;
+  const want = specKey = specKeyNow();
   const im = new Image();
-  im.onload = () => { if (want === `${BOX.recording}|${view[0]}|${view[1]}`) { img = im; imgView = [a, b]; draw(); } };
-  im.src = `/api/spec.png?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}`;
+  im.onload = () => { if (want === specKeyNow()) { img = im; imgView = [a, b]; colourise(); dispNote(); draw(); } };
+  im.src = `/api/spec.png?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}&n=${n}`;
   try { RAVEN = await api(`/api/raven?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}`); } catch { RAVEN = []; }
   draw();
 }
 
+// ---------------- display: the PNG is grey dB (0 = the view's top, 255 = META.spec_range_db below) ----------------
+// brightness moves the scale, contrast narrows it, the colour map paints it; nothing here changes a box or a score
+const CMAPS = {                 // quiet -> loud
+  "grey": ["#ffffff", "#000000"],
+  "grey dark": ["#000000", "#ffffff"],
+  viridis: ["#440154", "#482878", "#3e4989", "#31688e", "#26828e", "#1f9e89", "#35b779", "#6ece58", "#b5de2b", "#fde725"],
+  magma: ["#000004", "#180f3d", "#440f76", "#721f81", "#9e2f7f", "#cd4071", "#f1605d", "#fd9668", "#feca8d", "#fcfdbf"],
+};
+const DISPLAY = {bright: "50", contrast: "50", cmap: "grey", nfft: "1024", speed: "1"};   // defaults
+const dbSpan = c => c <= 50 ? 120 - 0.8 * c : 80 - (c - 50);   // contrast 0..50..100 -> 120..80..30 dB shown
+const dbTop = b => (b - 50) * 0.6;                              // brightness 0..50..100 -> full colour at -30..0..30 dB below the top
+let LUT = null, quietCss = "#fff", imgC = null;               // imgC: the image in colour, a canvas
+let GREY = null;                // the image's grey values (row-major, top row = fmaxPng), for the level readout
+function makeLut() {
+  const R = dbSpan(+$("contrast").value), top = dbTop(+$("bright").value);
+  const rgb = (CMAPS[$("cmap").value] || CMAPS.grey).map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
+  LUT = new Uint8ClampedArray(256 * 3);
+  for (let g = 0; g < 256; g++) {
+    const db = -META.spec_range_db * g / 255, v = Math.max(0, Math.min(1, (db + top + R) / R));
+    const p = v * (rgb.length - 1), i = Math.min(rgb.length - 2, Math.floor(p)), f = p - i;
+    for (let k = 0; k < 3; k++) LUT[3 * g + k] = rgb[i][k] + (rgb[i + 1][k] - rgb[i][k]) * f;
+  }
+  quietCss = `rgb(${LUT[765]},${LUT[766]},${LUT[767]})`;
+}
+function colourise() {
+  if (!img) return;
+  if (!LUT) makeLut();
+  const c = imgC || document.createElement("canvas");
+  c.width = img.width; c.height = img.height;
+  const x = c.getContext("2d", {willReadFrequently: true});
+  x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height), p = d.data;
+  const grey = new Uint8Array(c.width * c.height);
+  for (let i = 0; i < p.length; i += 4) { grey[i >> 2] = p[i]; const g = 3 * p[i]; p[i] = LUT[g]; p[i + 1] = LUT[g + 1]; p[i + 2] = LUT[g + 2]; p[i + 3] = 255; }
+  GREY = grey;
+  x.putImageData(d, 0, 0);
+  imgC = c;
+}
+function dispNote() {
+  const R = dbSpan(+$("contrast").value), top = dbTop(+$("bright").value), sr = fmaxPng * 2000, n = +$("nfft").value;
+  const hi = -top, lo = -top - R, sg = v => (v > 0 ? "+" : "") + v.toFixed(0);
+  $("dispnote").textContent = `colour scale ${sg(hi)} to ${sg(lo)} dB re the view's loudest · window ${(n / sr * 1000).toFixed(1)} ms, ${(sr / n).toFixed(0)} Hz bins`;
+}
+function loadDisplay() {
+  for (const [id, d] of Object.entries(DISPLAY)) {
+    const v = store.get("disp_" + id, d), el = $(id);
+    if (el.tagName !== "SELECT" || [...el.options].some(o => o.value === v)) el.value = v;
+  }
+  makeLut(); dispNote(); applySpeed();
+}
+const saveDisplay = () => Object.keys(DISPLAY).forEach(id => store.set("disp_" + id, $(id).value));
+let dispRaf = 0;
+function displayChanged() {
+  saveDisplay(); dispNote();
+  if (!dispRaf) dispRaf = requestAnimationFrame(() => { dispRaf = 0; makeLut(); colourise(); draw(); });
+}
+["bright", "contrast", "cmap"].forEach(id => $(id).addEventListener("input", displayChanged));
+$("nfft").addEventListener("change", () => { saveDisplay(); dispNote(); loadSpec(); });
+$("dispReset").onclick = () => {
+  const reload = $("nfft").value !== DISPLAY.nfft;
+  ["bright", "contrast", "cmap", "nfft"].forEach(id => { $(id).value = DISPLAY[id]; });
+  displayChanged();
+  if (reload) loadSpec();
+};
+
 async function predict() {
-  const id = BOX.id, t0 = acc[0], t1 = acc[1];
-  $("topwrap").innerHTML = `<span class="small">running ${BOX.model} on the windows of ${fmt(t0)}–${fmt(t1)} s …</span>`;
+  if (!BOX || isAudit()) return;
+  const seq = ++predSeq;
+  if (!acc) { $("topwrap").innerHTML = `<span class="small">Draw the box to see the model's top 5.</span>`; return; }
+  if (!BOX.lane) { PRED = null; $("topwrap").innerHTML = `<span class="small">Pick the box's group to see the model's top 5.</span>`; $("allwrap").style.display = "none"; return; }
+  const id = BOX.id, lane = BOX.lane, t0 = acc[0], t1 = acc[1];
+  $("topwrap").innerHTML = `<span class="small">running ${predictorOf(lane)} on the windows of ${fmt(t0)}–${fmt(t1)} s …</span>`;
   $("allwrap").style.display = "none";
+  const q = new URLSearchParams({id, kappa: $("kappa").value, t0: fmt(t0, 2), t1: fmt(t1, 2), lo: fmt(acc[2], 3), hi: fmt(acc[3], 3)});
+  if (BOX.new) { q.set("rec", BOX.recording); q.set("lane", lane); } else if (BOX.lane_editable) q.set("lane", lane);
   try {
-    const p = await api(`/api/predict?id=${encodeURIComponent(id)}&kappa=${$("kappa").value}&t0=${fmt(t0, 2)}&t1=${fmt(t1, 2)}`);
-    if (!BOX || BOX.id !== id) return;
+    const p = await api(`/api/predict?${q}`);
+    if (!BOX || BOX.id !== id || BOX.lane !== lane || seq !== predSeq) return;
     PRED = p; renderTop();
-  } catch (e) { $("topwrap").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  } catch (e) { if (seq === predSeq) $("topwrap").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
 function topRow(t, k, src) {
   const on = species.some(s => s.name.toLowerCase() === t.name.toLowerCase());
   const extra = [t.kind, t.ebird].filter(Boolean).join(" · ");
   return `<tr><td class="k">${src.startsWith("top") ? k + 1 : ""}</td>
-    <td><label class="inl"><input type="checkbox" data-name="${esc(t.name)}" data-src="${src}" ${on ? "checked" : ""}> <b>${esc(t.name)}</b></label>
-      <span class="small">${esc(extra)}</span></td>
+    <td><label class="inl"><input type="checkbox" data-name="${esc(t.name)}" data-common="${esc(t.common || "")}" data-src="${src}" ${on ? "checked" : ""}> <b>${esc(t.name)}</b>${t.common ? ` <span class="cn">· ${esc(t.common)}</span>` : ""}</label>
+      <div class="small">${esc(extra)}</div></td>
     <td style="width:120px"><span class="score" style="width:${Math.max(2, Math.min(1, Math.max(0, t.score)) * 80)}px"></span> <span class="small">${fmt(t.score, 3)}</span></td>
-    <td style="width:60px"><button class="pw" data-at="${t.at_s}" title="play the 5 s window where it scored highest">▶ ${fmt(t.at_s, 1)}</button></td></tr>`;
+    <td style="width:60px">${t.at_s == null ? "" : `<button class="pw" data-at="${t.at_s}" title="play the 5 s window where it scored highest">▶ ${fmt(t.at_s, 1)}</button>`}</td></tr>`;
 }
 function renderTop() {
   if (!PRED) return;
   $("scorename").textContent = ` ${PRED.score_name}, ${PRED.windows.length} window${PRED.windows.length > 1 ? "s" : ""}` +
     (Math.abs(PRED.span[0] - acc[0]) > 1e-3 || Math.abs(PRED.span[1] - acc[1]) > 1e-3 ? ` · for ${fmt(PRED.span[0])}–${fmt(PRED.span[1])} s` : "");
-  $("topwrap").innerHTML = `<table class="top">${PRED.top.map((t, k) => topRow(t, k, "top" + (k + 1))).join("")}</table>`;
+  // names learned from earlier reviews (review_species.py) above the zero-shot top 5, which stays as logged
+  const L = PRED.learned || [];
+  const learnedHtml = L.length ? `<div class="small">from your reviews (cosine to the boxes you named)</div>
+    <table class="top learned">${L.map((t, k) => topRow({...t, kind: `${t.n_boxes} box${t.n_boxes > 1 ? "es" : ""}, ${t.n_recordings} recording${t.n_recordings > 1 ? "s" : ""}`, ebird: "", at_s: null}, k, "learned")).join("")}</table>
+    <div class="small">zero-shot top 5</div>` : "";
+  $("topwrap").innerHTML = learnedHtml + `<table class="top">${PRED.top.map((t, k) => topRow(t, k, "top" + (k + 1))).join("")}</table>`;
   if (PRED.top_all && PRED.top_all.length) {
     $("allwrap").style.display = "";
     $("topall").innerHTML = `<table class="top">${PRED.top_all.map((t, k) => topRow(t, k, "perch_all")).join("")}</table>`;
@@ -296,20 +756,20 @@ function renderTop() {
 }
 document.addEventListener("change", e => {
   const c = e.target;
-  if (c.matches("input[data-name]")) toggleSpecies(c.dataset.name, c.dataset.src, c.checked);
+  if (c.matches("input[data-name]")) toggleSpecies(c.dataset.name, c.dataset.src, c.checked, c.dataset.common);
 });
 document.addEventListener("click", e => {
   const b = e.target.closest("button.pw");
   if (b) playRange(+b.dataset.at, +b.dataset.at + 5, 0, "original", "Perch window");
 });
-function toggleSpecies(name, src, on) {
+function toggleSpecies(name, src, on, common) {
   species = species.filter(s => s.name.toLowerCase() !== name.toLowerCase());
-  if (on) species.push({name, source: src});
+  if (on) species.push({name, source: src, common: common || ""});
   renderChips(); renderTop();
 }
 function renderChips() {
   $("chips").innerHTML = species.length ? species.map((s, k) =>
-    `<span class="chip">${esc(s.name)} <span class="small">${esc(s.source)}</span><b data-k="${k}" title="remove">×</b></span>`).join("")
+    `<span class="chip">${esc(s.name)}${s.common ? ` <span class="cn">· ${esc(s.common)}</span>` : ""} <span class="small">${esc(s.source)}</span><b data-k="${k}" title="remove">×</b></span>`).join("")
     : `<span class="small">none chosen</span>`;
 }
 $("chips").addEventListener("click", e => {
@@ -331,25 +791,25 @@ function renderSugg() {
   if (!q) { $("sugg").style.display = "none"; return; }
   const exact = suggs.some(s => s.name.toLowerCase() === q.toLowerCase());
   $("sugg").innerHTML = suggs.map((s, k) =>
-    `<div data-k="${k}" class="${k === hi ? "hi" : ""}"><b>${esc(s.name)}</b> <span class="small">${esc(s.source)} ${esc(s.note)}</span></div>`).join("")
+    `<div data-k="${k}" class="${k === hi ? "hi" : ""}"><b>${esc(s.name)}</b>${s.common ? ` <span class="cn">· ${esc(s.common)}</span>` : ""} <span class="small">${esc(s.source)} ${esc(s.note)}</span></div>`).join("")
     + (exact ? "" : `<div data-k="-2"><i>add “${esc(q)}” as typed</i> <span class="small">(not in any list)</span></div>`);
   $("sugg").style.display = "block";
 }
-function addSpecies(name) {
+function addSpecies(name, common) {
   name = name.trim(); if (!name) return;
-  if (!species.some(s => s.name.toLowerCase() === name.toLowerCase())) species.push({name, source: "added"});
+  if (!species.some(s => s.name.toLowerCase() === name.toLowerCase())) species.push({name, source: "added", common: common || ""});
   $("addsp").value = ""; suggs = []; $("sugg").style.display = "none";
   renderChips(); renderTop();
 }
 $("sugg").addEventListener("mousedown", e => {
   const d = e.target.closest("div[data-k]"); if (!d) return;
   e.preventDefault();
-  addSpecies(+d.dataset.k >= 0 ? suggs[+d.dataset.k].name : $("addsp").value);
+  if (+d.dataset.k >= 0) addSpecies(suggs[+d.dataset.k].name, suggs[+d.dataset.k].common); else addSpecies($("addsp").value);
 });
 $("addsp").addEventListener("keydown", e => {
   if (e.key === "ArrowDown") { hi = Math.min(suggs.length - 1, hi + 1); renderSugg(); e.preventDefault(); }
   else if (e.key === "ArrowUp") { hi = Math.max(-1, hi - 1); renderSugg(); e.preventDefault(); }
-  else if (e.key === "Enter" && !e.ctrlKey) { addSpecies(hi >= 0 ? suggs[hi].name : $("addsp").value); e.preventDefault(); }
+  else if (e.key === "Enter" && !e.ctrlKey) { if (hi >= 0) addSpecies(suggs[hi].name, suggs[hi].common); else addSpecies($("addsp").value); e.preventDefault(); }
   else if (e.key === "Escape") { $("sugg").style.display = "none"; }
 });
 $("addsp").addEventListener("blur", () => setTimeout(() => $("sugg").style.display = "none", 150));
@@ -357,47 +817,66 @@ $("addsp").addEventListener("blur", () => setTimeout(() => $("sugg").style.displ
 // ---------------- decision, box fields ----------------
 function renderDecision() {
   document.querySelectorAll(".dec button").forEach(b => b.classList.toggle("on", b.dataset.d === decision));
-  $("accept").disabled = !decision;
+  $("accept").disabled = !decision || !acc || (needsLane() && !BOX.lane);
 }
 document.querySelectorAll(".dec button").forEach(b => b.addEventListener("click", () => { decision = b.dataset.d; renderDecision(); }));
 function syncFields() {
-  ["b0", "b1", "f0", "f1"].forEach((id, k) => $(id).value = fmt(acc[k], 2));
-  const t = [BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz];
-  $("edited").textContent = acc.some((x, k) => Math.abs(x - t[k]) > 1e-3) ? "box edited (differs from the tightened box)" : "";
+  if (!acc) { $("boxtxt").textContent = "– (not drawn yet)"; $("edited").textContent = ""; return; }
+  $("boxtxt").textContent = `${fmt(acc[0])}–${fmt(acc[1])} s · ${fmt(acc[2])}–${fmt(acc[3])} kHz` +
+    `  (${fmt(acc[1] - acc[0])} s × ${fmt(acc[3] - acc[2])} kHz)`;
+  if (BOX.new) { $("edited").textContent = ""; return; }
+  const t = BOX.refined || [BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz];
+  $("edited").textContent = acc.some((x, k) => Math.abs(x - t[k]) > 1e-3)
+    ? `box edited (differs from the ${BOX.refined ? "refined box" : $("resetTight").textContent})` : "";
 }
-["b0", "b1", "f0", "f1"].forEach((id, k) => $(id).addEventListener("change", () => {
-  const v = parseFloat($(id).value); if (isFinite(v)) acc[k] = v;
-  syncFields(); draw();
-}));
-$("resetTight").onclick = () => { acc = [BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz]; syncFields(); draw(); };
-$("resetFull").onclick = () => { acc = [BOX.begin_s, BOX.end_s, 0.06, 16.0]; syncFields(); draw(); };
+function setBox(b) { stopAudio(); $("playnote").textContent = ""; acc = b; syncFields(); renderDecision(); draw(); }
+$("resetRefined").onclick = () => { if (BOX.refined) setBox(BOX.refined.slice()); };
+$("resetTight").onclick = () => setBox([BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz]);
+$("resetFull").onclick = () => setBox([BOX.begin_s, BOX.end_s, 0.06, 16.0]);
 $("repredict").onclick = () => predict();
 
 // ---------------- accept ----------------
 async function accept() {
-  if (!decision || !BOX) return;
+  if (!decision || !BOX || isAudit()) return;
+  if (!acc) { $("msg").innerHTML = `<span class="err">draw the box first</span>`; return; }
+  if (needsLane() && !BOX.lane) { $("msg").innerHTML = `<span class="err">pick the box's group</span>`; return; }
   if (!(acc[0] < acc[1] && acc[2] < acc[3])) { $("msg").innerHTML = `<span class="err">box needs from &lt; to and low &lt; high</span>`; return; }
   const body = {id: BOX.id, kappa: +$("kappa").value, reviewer: $("reviewer").value, decision, species,
     begin_s: acc[0], end_s: acc[1], lo_khz: acc[2], hi_khz: acc[3], comment: $("comment").value,
-    top: PRED ? PRED.top : [], prediction_span: PRED ? `${fmt(PRED.span[0])}-${fmt(PRED.span[1])}` : ""};
+    top: PRED ? PRED.top : [], prediction_span: PRED ? `${fmt(PRED.span[0])}-${fmt(PRED.span[1])}` : "",
+    learned: PRED && PRED.learned ? PRED.learned.map(t => ({name: t.name})) : [], learned_control: !!(PRED && PRED.learned_control)};
+  if (needsLane()) body.lane = BOX.lane;
+  if (BOX.new) { body.new = true; body.recording = BOX.recording; delete body.id; }
   try {
     const row = await api("/api/log", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
     META.n_logged += 1; logStat();
     const r = META.recordings.find(r => r.id === BOX.recording);
-    if (!BOXES[cur].decision) r.reviewed += 1;
-    BOXES[cur].decision = row.decision; BOXES[cur].species = row.species;
-    $("msg").textContent = `logged ${row.log_id} (${row.decision}${row.species ? ", " + row.species : ""})`;
+    const said = `logged ${row.log_id} (${row.lane}, ${row.decision}${row.species ? ", " + row.species : ""})`;
+    if (BOX.new) {                     // back to where the box was drawn from, with the box in the list
+      r.reviewed += 1; fillRecs();
+      await loadRec(PARENT || row.id, minuteMode() ? MIN : undefined);
+      $("msg").textContent = $("auditmsg").textContent = "new box " + said;
+      return;
+    }
+    const it = BOXES[cur];
+    if (!it.decision) r.reviewed += 1;
+    Object.assign(it, {decision: row.decision, species: row.species, lane: row.lane,
+                       acc: [+row.accepted_begin_s, +row.accepted_end_s, +row.accepted_lo_khz, +row.accepted_hi_khz]});
+    $("msg").textContent = said;
     fillRecs(); renderList();
     if ($("advance").checked) nextUnreviewed();
   } catch (e) { $("msg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
 $("accept").onclick = accept;
 function nextUnreviewed() {
+  const open = b => b.source === "audit" ? !b.status : !b.decision;
   for (let k = 1; k <= BOXES.length; k++) {
     const i = (cur + k) % BOXES.length;
-    if (!BOXES[i].decision) { select(i); return; }
+    if (open(BOXES[i])) { select(i); return; }
   }
-  $("msg").textContent += " · every box in this recording and these lanes is logged";
+  $(isAudit() ? "auditmsg" : "msg").textContent += minuteMode()
+    ? ` · everything listed in this minute is done: look for missed calls, then ] for the next minute`
+    : " · everything listed for this recording is done";
 }
 
 // ---------------- drawing ----------------
@@ -415,20 +894,36 @@ const fy = (g, f) => g.y1 - f / g.fv * (g.y1 - g.y0);
 const xt = (g, x) => view[0] + (x - g.x0) / (g.x1 - g.x0) * (view[1] - view[0]);
 const yf = (g, y) => (g.y1 - y) / (g.y1 - g.y0) * g.fv;
 function draw() {
-  if (!BOX) return;
+  if (!BOX && !minuteMode()) return;
   const g = geom();
   ctx.fillStyle = "#000"; ctx.fillRect(0, 0, g.W, g.H);
-  ctx.fillStyle = "#fff"; ctx.fillRect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0);
+  ctx.fillStyle = quietCss; ctx.fillRect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0);
   if (img && imgView) {
-    // image spans imgView in time and 0..fmaxPng in frequency (top = fmaxPng)
+    // image spans imgView in time and 0..fmaxPng in frequency (top = fmaxPng); drawn in colour (imgC)
     const fr = Math.min(1, g.fv / fmaxPng), sh = img.height * fr;
     const ix0 = tx(g, imgView[0]), ix1 = tx(g, imgView[1]);
     ctx.save(); ctx.beginPath(); ctx.rect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0); ctx.clip();
-    ctx.drawImage(img, 0, img.height - sh, img.width, sh, ix0, fy(g, Math.min(g.fv, fmaxPng)), ix1 - ix0, g.y1 - fy(g, Math.min(g.fv, fmaxPng)));
+    ctx.drawImage(imgC || img, 0, img.height - sh, img.width, sh, ix0, fy(g, Math.min(g.fv, fmaxPng)), ix1 - ix0, g.y1 - fy(g, Math.min(g.fv, fmaxPng)));
     ctx.restore();
   }
   ctx.save(); ctx.beginPath(); ctx.rect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0); ctx.clip();
-  const col = META.colors[BOX.lane] || "#e6194b";
+  const col = (BOX && META.colors[BOX.lane]) || "#e6194b";
+  // minute view: every listed box of the minute but the open one; solid = logged, dashed = not yet, grey = no
+  if (minuteMode()) {
+    ctx.font = "11px system-ui";
+    const mark = {yes: "✓", no: "✗", unknown: "?"};
+    BOXES.forEach((b, i) => {
+      if (i === cur || b.source === "audit") return;
+      const [a, e, lo, hi] = rectOf(b);
+      if (e < view[0] || a > view[1]) return;
+      const c = b.decision === "no" ? "#8a8a8a" : META.colors[b.lane] || "#888";
+      ctx.strokeStyle = c; ctx.lineWidth = 1.4; ctx.setLineDash(b.decision ? [] : [5, 3]);
+      ctx.strokeRect(tx(g, a), fy(g, hi), tx(g, e) - tx(g, a), fy(g, lo) - fy(g, hi));
+      ctx.setLineDash([]); ctx.fillStyle = c;
+      ctx.fillText(`#${b.n}${mark[b.decision] ? " " + mark[b.decision] : ""}`, Math.max(g.x0 + 2, tx(g, a) + 2),
+                   Math.min(g.y1 - 2, Math.max(g.y0 + 11, fy(g, hi) + 11)));
+    });
+  }
   // Raven boxes
   if ($("showRaven").checked) {
     ctx.font = "11px system-ui";
@@ -440,25 +935,65 @@ function draw() {
       ctx.fillText("Raven: " + r.label, Math.max(g.x0 + 2, X0 + 2), Math.max(g.y0 + 11, Y0 + 11));
     });
   }
-  // kept cells
-  if ($("showCells").checked) {
-    ctx.fillStyle = hexA(col, .22);
-    BOX.kept_rects.forEach(([a, b, lo, hi]) => ctx.fillRect(tx(g, a), fy(g, hi), tx(g, b) - tx(g, a), fy(g, lo) - fy(g, hi)));
+  // audit window: shade what lies outside it
+  const W = auditWin();
+  if (W) {
+    ctx.fillStyle = "rgba(0,0,0,.28)";
+    ctx.fillRect(g.x0, g.y0, tx(g, W[0]) - g.x0, g.y1 - g.y0);
+    ctx.fillRect(tx(g, W[1]), g.y0, g.x1 - tx(g, W[1]), g.y1 - g.y0);
   }
-  // model box (full Perch band), dashed
-  ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
-  ctx.strokeRect(tx(g, BOX.begin_s), fy(g, 16), tx(g, BOX.end_s) - tx(g, BOX.begin_s), fy(g, 0.06) - fy(g, 16));
-  // tightened box, solid thin
-  ctx.setLineDash([]); ctx.lineWidth = 1;
-  ctx.strokeRect(tx(g, BOX.t_begin), fy(g, BOX.hi_khz), tx(g, BOX.t_end) - tx(g, BOX.t_begin), fy(g, BOX.lo_khz) - fy(g, BOX.hi_khz));
-  // accepted box, thick
-  const A = drag && drag.rect ? drag.rect : acc;
-  ctx.lineWidth = 2.5; ctx.strokeStyle = "#111"; ctx.strokeRect(tx(g, A[0]), fy(g, A[3]), tx(g, A[1]) - tx(g, A[0]), fy(g, A[2]) - fy(g, A[3]));
-  ctx.lineWidth = 1.2; ctx.strokeStyle = "#ffd400"; ctx.strokeRect(tx(g, A[0]), fy(g, A[3]), tx(g, A[1]) - tx(g, A[0]), fy(g, A[2]) - fy(g, A[3]));
+  // the reviewer's own boxes in view (green dotted, labelled with their group)
+  ctx.font = "11px system-ui";
+  ALL.filter(b => b.source === "reviewer" && b.acc && !(BOX && b.id === BOX.id) && b.acc[1] > view[0] && b.acc[0] < view[1]
+                  && !(minuteMode() && BOXES.includes(b))).forEach(b => {
+    const [a, e, lo, hi] = b.acc;
+    ctx.strokeStyle = "rgba(0,150,60,.95)"; ctx.lineWidth = 1.5; ctx.setLineDash([1, 3]);
+    ctx.strokeRect(tx(g, a), fy(g, hi), tx(g, e) - tx(g, a), fy(g, lo) - fy(g, hi));
+    ctx.setLineDash([]); ctx.fillStyle = "rgba(0,120,50,.95)";
+    ctx.fillText(`yours: ${b.lane}`, tx(g, a) + 2, Math.min(g.y1 - 2, fy(g, lo) - 3));
+  });
+  if (BOX && !BOX.new && !isAudit()) {
+    // kept cells
+    if ($("showCells").checked) {
+      ctx.fillStyle = hexA(col, .22);
+      BOX.kept_rects.forEach(([a, b, lo, hi]) => ctx.fillRect(tx(g, a), fy(g, hi), tx(g, b) - tx(g, a), fy(g, lo) - fy(g, hi)));
+    }
+    if (BOX.source === "model" || BOX.source === "near") {
+      // model box (full Perch band), dashed
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+      ctx.strokeRect(tx(g, BOX.begin_s), fy(g, 16), tx(g, BOX.end_s) - tx(g, BOX.begin_s), fy(g, 0.06) - fy(g, 16));
+    }
+    // tightened / original box, solid thin
+    ctx.strokeStyle = col; ctx.setLineDash([]); ctx.lineWidth = 1;
+    ctx.strokeRect(tx(g, BOX.t_begin), fy(g, BOX.hi_khz), tx(g, BOX.t_end) - tx(g, BOX.t_begin), fy(g, BOX.lo_khz) - fy(g, BOX.hi_khz));
+    // refined box (only when the refiner is confident and adopted for this group), dotted
+    if (BOX.refined) {
+      const [a, e, lo, hi] = BOX.refined;
+      ctx.strokeStyle = col; ctx.lineWidth = 1.5; ctx.setLineDash([2, 3]);
+      ctx.strokeRect(tx(g, a), fy(g, hi), tx(g, e) - tx(g, a), fy(g, lo) - fy(g, hi));
+      ctx.setLineDash([]);
+    }
+  }
+  // accepted box, thick (an audit window has none: a drag there starts a new box)
+  const A = drag && drag.rect ? drag.rect : isAudit() ? null : acc;
+  if (A) {
+    ctx.setLineDash([]);
+    ctx.lineWidth = 2.5; ctx.strokeStyle = "#111"; ctx.strokeRect(tx(g, A[0]), fy(g, A[3]), tx(g, A[1]) - tx(g, A[0]), fy(g, A[2]) - fy(g, A[3]));
+    ctx.lineWidth = 1.2; ctx.strokeStyle = "#ffd400"; ctx.strokeRect(tx(g, A[0]), fy(g, A[3]), tx(g, A[1]) - tx(g, A[0]), fy(g, A[2]) - fy(g, A[3]));
+  }
+  // play cursor ('play view' starts here), dashed
+  const ct = cursorT();
+  if (ct != null) {
+    const x = tx(g, ct); ctx.strokeStyle = "#1e90ff"; ctx.lineWidth = 1.2; ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(x, g.y0); ctx.lineTo(x, g.y1); ctx.stroke(); ctx.setLineDash([]);
+  }
   // playhead
-  const au = $("audio");
   if (!au.paused) { const x = tx(g, clipStart + au.currentTime); ctx.strokeStyle = "#e00"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x, g.y0); ctx.lineTo(x, g.y1); ctx.stroke(); }
   ctx.restore();
+  if (ct != null) {                                       // the cursor's handle on the time axis
+    const x = tx(g, ct); ctx.fillStyle = "#1e90ff";
+    ctx.beginPath(); ctx.moveTo(x, g.y1); ctx.lineTo(x - 5, g.y1 + 8); ctx.lineTo(x + 5, g.y1 + 8); ctx.closePath(); ctx.fill();
+  }
   // axes
   ctx.fillStyle = "#ddd"; ctx.font = "11px system-ui"; ctx.strokeStyle = "#888"; ctx.lineWidth = 1;
   const span = view[1] - view[0], step = [0.5, 1, 2, 5, 10, 20, 30, 60].find(s => span / s <= 12) || 120;
@@ -468,6 +1003,7 @@ function draw() {
   }
   const fstep = g.fv <= 4 ? 0.5 : g.fv <= 8 ? 1 : g.fv <= 16 ? 2 : 4;
   for (let f = 0; f <= g.fv + 1e-9; f += fstep) { const y = fy(g, f); ctx.beginPath(); ctx.moveTo(g.x0 - 4, y); ctx.lineTo(g.x0, y); ctx.stroke(); ctx.fillText(f + "k", 4, y + 4); }
+  drawOverview();
 }
 function secs(t) { const m = Math.floor(t / 60), s = t - 60 * m; return `${m}:${s.toFixed(span1() ? 1 : 0).padStart(span1() ? 4 : 2, "0")}`; }
 function span1() { return view[1] - view[0] <= 12; }
@@ -475,75 +1011,431 @@ function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >
 window.addEventListener("resize", draw);
 ["fview", "showRaven", "showCells"].forEach(id => $(id).addEventListener("change", draw));
 
-// drag to redraw the accepted box
+// The box is set by drawing: drag anywhere on the spectrogram for a new box (also inside the
+// current one), or grab an edge / corner of the yellow box (within EDGE px) to move just that side.
+const EDGE = 7, MIN_T = 0.05, MIN_F = 0.05;
+function canvasXY(e) { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+function clampTF(g, x, y) {
+  return [Math.max(0, Math.min(BOX ? BOX.duration_s : recDur(), xt(g, x))), Math.max(0, Math.min(Math.min(fmaxPng, g.fv), yf(g, y)))];
+}
+// minute view: the listed box under a click (the smallest, so a call inside a bout box can be picked)
+function boxAt(g, x, y) {
+  const t = xt(g, x), f = yf(g, y);
+  let best = -1, area = Infinity;
+  BOXES.forEach((b, i) => {
+    if (b.source === "audit") return;
+    const [a, e, lo, hi] = rectOf(b);
+    if (t >= a && t <= e && f >= lo && f <= hi && (e - a) * (hi - lo) < area) { best = i; area = (e - a) * (hi - lo); }
+  });
+  return best;
+}
+function edgesAt(g, x, y) {
+  if (!acc || isAudit()) return null;
+  const X0 = tx(g, acc[0]), X1 = tx(g, acc[1]), Y0 = fy(g, acc[3]), Y1 = fy(g, acc[2]);
+  const inX = x > X0 - EDGE && x < X1 + EDGE, inY = y > Y0 - EDGE && y < Y1 + EDGE;
+  let l = inY && Math.abs(x - X0) <= EDGE, r = inY && Math.abs(x - X1) <= EDGE;
+  let t = inX && Math.abs(y - Y0) <= EDGE, b = inX && Math.abs(y - Y1) <= EDGE;
+  if (l && r) { l = x - X0 <= X1 - x; r = !l; }          // narrow box: the nearer side
+  if (t && b) { t = y - Y0 <= Y1 - y; b = !t; }
+  return l || r || t || b ? {l, r, t, b} : null;
+}
+function edgeCursor(h) {
+  if (!h) return "crosshair";
+  if ((h.l || h.r) && (h.t || h.b)) return (h.l && h.t) || (h.r && h.b) ? "nwse-resize" : "nesw-resize";
+  return h.l || h.r ? "ew-resize" : "ns-resize";
+}
+const live = () => BOX || minuteMode();                 // something is on the spectrogram
+cv.addEventListener("mousedown", e => { if (e.button === 1) e.preventDefault(); });   // no autoscroll on a middle drag
 cv.addEventListener("pointerdown", e => {
-  if (!BOX) return;
-  const g = geom(), r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
-  if (x < g.x0 || y > g.y1) return;
-  drag = {t: xt(g, x), f: yf(g, y), rect: null};
+  if (!live()) return;
+  const g = geom(), [x, y] = canvasXY(e);
+  if (e.button === 1 || (e.button === 0 && e.shiftKey)) {   // pan: Shift+drag or a middle-button drag
+    e.preventDefault();
+    drag = {pan: true, x, v0: view.slice()};
+    cv.style.cursor = "grabbing"; cv.setPointerCapture(e.pointerId);
+    return readout(g, x, y);
+  }
+  if (e.button !== 0) return;
+  if (onTimeAxis(g, x, y)) return setCursor(xt(g, x));
+  if (x < g.x0 || y > g.y1) return;                       // axes
+  stopAudio();
+  const h = edgesAt(g, x, y), [t, f] = clampTF(g, x, y);
+  drag = h ? {edge: h, base: acc.slice(), rect: null, x, y} : {t, f, rect: null, x, y};
   cv.setPointerCapture(e.pointerId);
 });
 cv.addEventListener("pointermove", e => {
-  if (!drag) return;
-  const g = geom(), r = cv.getBoundingClientRect();
-  const t = Math.max(0, Math.min(BOX.duration_s, xt(g, e.clientX - r.left))), f = Math.max(0, Math.min(fmaxPng, yf(g, e.clientY - r.top)));
-  drag.rect = [Math.min(drag.t, t), Math.max(drag.t, t), Math.min(drag.f, f), Math.max(drag.f, f)];
+  if (!live()) return;
+  const g = geom(), [x, y] = canvasXY(e);
+  if (!drag) {
+    const axis = onTimeAxis(g, x, y);
+    cv.style.cursor = axis ? "pointer" : x < g.x0 || y > g.y1 ? "default" : e.shiftKey ? "grab" : edgeCursor(edgesAt(g, x, y));
+    cv.title = axis ? "click to move the play cursor ('play view' starts there)" : "";
+    return readout(g, x, y);
+  }
+  if (drag.pan) {
+    const w = drag.v0[1] - drag.v0[0], dt = (x - drag.x) / (g.x1 - g.x0) * w;
+    setView([drag.v0[0] - dt, drag.v0[1] - dt], true);
+    return readout(g, x, y);
+  }
+  const [t, f] = clampTF(g, x, y);
+  let q;
+  if (drag.edge) {
+    q = drag.base.slice();
+    if (drag.edge.l) q[0] = t; if (drag.edge.r) q[1] = t;
+    if (drag.edge.b) q[2] = f; if (drag.edge.t) q[3] = f;
+  } else q = [drag.t, t, drag.f, f];
+  drag.rect = [Math.min(q[0], q[1]), Math.max(q[0], q[1]), Math.min(q[2], q[3]), Math.max(q[2], q[3])];
   draw();
+  readout(g, x, y);
 });
-cv.addEventListener("pointerup", () => {
-  if (drag && drag.rect && drag.rect[1] - drag.rect[0] > 0.05 && drag.rect[3] - drag.rect[2] > 0.05) { acc = drag.rect.map(v => Math.round(v * 1000) / 1000); syncFields(); }
-  drag = null; draw();
+function endDrag() {
+  const D = drag, R = drag && drag.rect;
+  drag = null;
+  if (!D) return;
+  if (D.pan) { cv.style.cursor = "crosshair"; return setView(view); }   // load the image for where it stopped
+  if (R && R[1] - R[0] > MIN_T && R[3] - R[2] > MIN_F) {
+    // a new box: drawn in an audit window, in an empty minute, or (minute view) begun outside the open box;
+    // a drag begun inside the open box redraws it, as before
+    const outside = minuteMode() && BOX && !BOX.new && !isAudit() && !D.edge &&
+      !(acc && D.t >= acc[0] && D.t <= acc[1] && D.f >= acc[2] && D.f <= acc[3]);
+    if (isAudit() || !BOX || outside) startNew();
+    setBox(R.map(v => Math.round(v * 1000) / 1000));
+    if ($("autoplay").checked) playBox();
+    if (BOX.new) predict();
+    return;
+  }
+  // a click: in the minute view, open the listed box under it
+  if (minuteMode() && !D.edge && !(BOX && BOX.new)) {
+    const i = boxAt(geom(), D.x, D.y);
+    if (i >= 0 && i !== cur) return select(i);
+  }
+  draw();                                                 // too small, or nothing there: unchanged
+}
+cv.addEventListener("pointerup", e => {                  // then the readout drops the box / view line
+  endDrag();
+  if (live()) { const [x, y] = canvasXY(e); readout(geom(), x, y); }
 });
+cv.addEventListener("pointercancel", () => { const p = drag && drag.pan; drag = null; if (p) setView(view); else draw(); });
+cv.addEventListener("pointerleave", () => { if (!drag) $("readout").style.display = "none"; });
+// wheel over the plot: zoom in time about the mouse; Shift+wheel (or a sideways wheel) pans. The page
+// scrolls as usual over the axes and outside the canvas.
+cv.addEventListener("wheel", e => {
+  if (!live()) return;
+  const g = geom(), [x, y] = canvasXY(e);
+  if (x < g.x0 || x > g.x1 || y < g.y0 || y > g.y1) return;
+  e.preventDefault();
+  const px = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? g.H : 1;   // lines / pages to pixels
+  const w = view[1] - view[0], side = e.shiftKey ? (e.deltaX || e.deltaY) : e.deltaX;
+  if (side && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) {
+    const dt = side * px / (g.x1 - g.x0) * w;
+    setView([view[0] + dt, view[1] + dt], true);
+  } else if (e.deltaY) zoomAbout(xt(g, x), Math.exp(Math.max(-1, Math.min(1, e.deltaY * px * 0.002))));
+  readout(g, x, y);
+}, {passive: false});
+
+// ---------------- readout: time, frequency and level under the mouse ----------------
+const tstr = t => { const m = Math.floor(t / 60); return `${m}:${(t - 60 * m).toFixed(3).padStart(6, "0")}`; };
+// grey value of the image at (t, f): null when the image does not cover it (not loaded yet, above its top)
+function levelAt(t, f) {
+  if (!GREY || !img || !imgView || t < imgView[0] || t >= imgView[1] || f < 0 || f > fmaxPng) return null;
+  const c = Math.min(img.width - 1, Math.floor((t - imgView[0]) / (imgView[1] - imgView[0]) * img.width));
+  const r = Math.min(img.height - 1, Math.max(0, Math.floor((1 - f / fmaxPng) * img.height)));
+  return GREY[r * img.width + c];
+}
+function readout(g, x, y) {
+  const el = $("readout"), inT = x >= g.x0 && x <= g.x1, inF = y >= g.y0 && y <= g.y1;
+  if (!inT) { el.style.display = "none"; return; }
+  const t = xt(g, x), f = yf(g, y);
+  let s = `t ${tstr(t)}`;
+  if (inF) {
+    s += `  f ${f.toFixed(2)} kHz`;
+    const gv = levelAt(t, f);
+    if (gv != null) s += `  ${gv >= 255 ? "≤" : ""}${(-META.spec_range_db * gv / 255).toFixed(0)} dB`;
+  }
+  if (drag && drag.rect) {
+    const R = drag.rect;
+    s += `\nbox ${tstr(R[0])}–${tstr(R[1])} (${(R[1] - R[0]).toFixed(3)} s) · ${R[2].toFixed(2)}–${R[3].toFixed(2)} kHz`;
+  } else if (drag && drag.pan) s += `\nview ${tstr(view[0])}–${tstr(view[1])}`;
+  el.textContent = s; el.style.display = "block";
+  el.title = "dB re the view's loudest (its 99.9th percentile)";
+}
+
+// ---------------- overview: the whole recording ----------------
+// items listed (ticked groups and sources, every minute): filled = yes, outlined dashed = not logged yet,
+// grey = no; Raven boxes in blue; the minute grid (the open minute shaded); the view as a white frame
+const ov = $("overview"), octx = ov.getContext("2d");
+let RAVEN_ALL = {rec: "", boxes: []};
+async function loadRavenAll(rec) {
+  if (RAVEN_ALL.rec === rec) return;
+  RAVEN_ALL = {rec, boxes: []};
+  const d = (META.recordings.find(r => r.id === rec) || {}).duration_s || 0;
+  try { const b = await api(`/api/raven?rec=${encodeURIComponent(rec)}&a=0&b=${d}`); if (RAVEN_ALL.rec === rec) RAVEN_ALL.boxes = b; }
+  catch { /* the strip just has no Raven boxes */ }
+  drawOverview();
+}
+function ovGeom() {
+  const W = ov.clientWidth, H = ov.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr)) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const d = BOX ? BOX.duration_s : recDur();
+  return {W, H, x0: PADL, x1: W - 6, y0: 3, y1: H - 13, d, fv: +$("fview").value};
+}
+const otx = (o, t) => o.x0 + t / o.d * (o.x1 - o.x0);
+const ofy = (o, f) => o.y1 - Math.min(f, o.fv) / o.fv * (o.y1 - o.y0);
+const oxt = (o, x) => Math.max(0, Math.min(o.d, (x - o.x0) / (o.x1 - o.x0) * o.d));
+function drawOverview() {
+  if (!META || !live()) return;
+  const o = ovGeom(), c = octx, rec = viewRec();
+  c.fillStyle = "#111"; c.fillRect(0, 0, o.W, o.H);
+  c.fillStyle = "#1c1c1c"; c.fillRect(o.x0, o.y0, o.x1 - o.x0, o.y1 - o.y0);
+  // minutes: grid, labels where they fit, the open minute shaded
+  const M = META.minute_s, nm = Math.ceil(o.d / M - 1e-9), every = Math.max(1, Math.ceil(36 / ((o.x1 - o.x0) * M / o.d)));
+  if (minuteMode()) { c.fillStyle = "rgba(255,255,255,.10)"; c.fillRect(otx(o, MIN * M), o.y0, otx(o, Math.min(o.d, (MIN + 1) * M)) - otx(o, MIN * M), o.y1 - o.y0); }
+  c.font = "10px system-ui"; c.strokeStyle = "rgba(255,255,255,.18)"; c.lineWidth = 1;
+  for (let m = 0; m <= nm; m++) {
+    const x = Math.round(otx(o, Math.min(o.d, m * M))) + .5;
+    c.beginPath(); c.moveTo(x, o.y0); c.lineTo(x, o.y1 + 3); c.stroke();
+    if (m < nm && m % every === 0) { c.fillStyle = "#aaa"; c.fillText(`${m}:00`, x + 2, o.H - 2); }
+  }
+  c.save(); c.beginPath(); c.rect(o.x0, o.y0, o.x1 - o.x0, o.y1 - o.y0); c.clip();
+  if ($("showRaven").checked && RAVEN_ALL.rec === rec) {
+    c.strokeStyle = "rgba(60,130,255,.75)"; c.lineWidth = 1;
+    RAVEN_ALL.boxes.forEach(r => c.strokeRect(otx(o, r.begin_s), ofy(o, r.hi_khz), Math.max(1, otx(o, r.end_s) - otx(o, r.begin_s)), ofy(o, r.lo_khz) - ofy(o, r.hi_khz)));
+  }
+  const curB = BOXES[cur];
+  listed().forEach(b => {
+    if (b.source === "audit") {                            // audit windows: a band along the bottom
+      c.fillStyle = b.status ? "rgba(255,255,255,.55)" : "rgba(255,255,255,.25)";
+      c.fillRect(otx(o, b.begin_s), o.y1 - 3, Math.max(1, otx(o, b.end_s) - otx(o, b.begin_s)), 3);
+      return;
+    }
+    const [a, e, lo, hi] = rectOf(b), X = otx(o, a), Wd = Math.max(1.5, otx(o, e) - X), Y = ofy(o, hi), Hd = Math.max(1.5, ofy(o, lo) - Y);
+    const col = b.decision === "no" ? "#8a8a8a" : META.colors[b.lane] || "#888";
+    if (b.decision === "yes") { c.fillStyle = hexA(col, .55); c.fillRect(X, Y, Wd, Hd); }
+    c.strokeStyle = col; c.lineWidth = 1; c.setLineDash(b.decision ? [] : [3, 2]);
+    c.strokeRect(X, Y, Wd, Hd); c.setLineDash([]);
+  });
+  if (curB && curB.source !== "audit") {
+    const [a, e, lo, hi] = rectOf(curB);
+    c.strokeStyle = "#ffd400"; c.lineWidth = 1.5; c.strokeRect(otx(o, a), ofy(o, hi), Math.max(2, otx(o, e) - otx(o, a)), ofy(o, lo) - ofy(o, hi));
+  }
+  const ct = cursorT();
+  if (ct != null) { const x = otx(o, ct); c.strokeStyle = "#1e90ff"; c.beginPath(); c.moveTo(x, o.y0); c.lineTo(x, o.y1); c.stroke(); }
+  if (!au.paused) { const x = otx(o, clipStart + au.currentTime); c.strokeStyle = "#e00"; c.lineWidth = 1.5; c.beginPath(); c.moveTo(x, o.y0); c.lineTo(x, o.y1); c.stroke(); }
+  c.restore();
+  // the view: a white frame, the rest dimmed
+  const v0 = otx(o, view[0]), v1 = Math.max(v0 + 2, otx(o, view[1]));
+  c.fillStyle = "rgba(0,0,0,.35)"; c.fillRect(o.x0, o.y0, v0 - o.x0, o.y1 - o.y0); c.fillRect(v1, o.y0, o.x1 - v1, o.y1 - o.y0);
+  c.strokeStyle = "#fff"; c.lineWidth = 1.5; c.strokeRect(v0, o.y0 + .75, v1 - v0, o.y1 - o.y0 - 1.5);
+  c.fillStyle = "#ddd"; c.font = "10px system-ui"; c.fillText("all", 6, (o.y0 + o.y1) / 2 + 4);
+}
+// click or drag on the strip: the view's centre follows the mouse (kept inside the open minute in the
+// minute view); a click in another minute of the minute view goes to that minute
+let ovDrag = null;
+function ovCentre(o, x) {
+  const t = oxt(o, x), w = view[1] - view[0];
+  let a = t - w / 2;
+  if (minuteMode()) { const [m0, m1] = minuteRange(); a = Math.max(m0, Math.min(m1 - w, a)); }
+  setView([a, a + w], true);
+}
+ov.addEventListener("pointerdown", e => {
+  if (!live() || e.button !== 0) return;
+  const o = ovGeom(), x = e.clientX - ov.getBoundingClientRect().left, t = oxt(o, x);
+  if (minuteMode()) {
+    const m = Math.min(nMinutes() - 1, Math.floor(t / META.minute_s));
+    if (m !== MIN) return gotoMinute(m);
+  }
+  ovDrag = {id: e.pointerId}; ov.setPointerCapture(e.pointerId);
+  ovCentre(o, x);
+});
+ov.addEventListener("pointermove", e => {
+  if (!ovDrag) return;
+  ovCentre(ovGeom(), e.clientX - ov.getBoundingClientRect().left);
+});
+const ovEnd = () => { if (ovDrag) { ovDrag = null; setView(view); } };
+ov.addEventListener("pointerup", ovEnd);
+ov.addEventListener("pointercancel", ovEnd);
+// export: this recording's selection table, as the server builds it from the log now
+$("exportRaven").onclick = () => {
+  const a = document.createElement("a");
+  a.href = `/api/raven_table.txt?rec=${encodeURIComponent(viewRec())}&keep=${$("exportKeep").value}`;
+  a.download = `${viewRec()}.Table.1.selections.txt`;
+  document.body.appendChild(a); a.click(); a.remove();
+};
 
 // view controls
 $("panL").onclick = () => { const w = view[1] - view[0]; setView([view[0] - w * .75, view[1] - w * .75]); };
 $("panR").onclick = () => { const w = view[1] - view[0]; setView([view[0] + w * .75, view[1] + w * .75]); };
 $("zoomIn").onclick = () => { const c = (view[0] + view[1]) / 2, w = Math.max(2, (view[1] - view[0]) / 2); setView([c - w / 2, c + w / 2]); };
 $("zoomOut").onclick = () => { const c = (view[0] + view[1]) / 2, w = (view[1] - view[0]) * 2; setView([c - w / 2, c + w / 2]); };
-$("viewBox").onclick = () => setView(BOX.view);
+$("viewBox").onclick = () => { if (BOX && BOX.view) setView(BOX.view); };
 
 // ---------------- audio ----------------
 const au = $("audio");
+// speed: slower plays lower (pitch not preserved), as on tape; set again after each new src
+function applySpeed() {
+  const r = +$("speed").value;
+  au.preservesPitch = false; au.defaultPlaybackRate = r; au.playbackRate = r;
+}
+const speedNote = () => $("speed").value === "1" ? "" : ` · ${$("speed").selectedOptions[0].textContent} speed`;
+$("speed").addEventListener("change", () => { saveDisplay(); applySpeed(); });
 function playRange(t0, t1, pad, mode, what) {
   if (!BOX) return;
   stopAudio();
   clipStart = Math.max(0, t0 - pad);
+  if (!acc) return;
   const q = new URLSearchParams({id: BOX.id, kappa: $("kappa").value, t0, t1, lo: acc[2], hi: acc[3], pad, mode});
-  au.src = `/api/audio.wav?${q}`;
-  const end = Math.min(t1 + pad, clipStart + 30);
-  $("playnote").textContent = `${what}: ${fmt(clipStart)}–${fmt(end)} s, ${mode}` +
-    (mode === "band-passed" ? ` ${fmt(acc[2])}–${fmt(acc[3])} kHz` : mode === "cell mask" ? (BOX.tightened ? ` (${BOX.kept_rects.length} cell runs; the edited box is not used)` : " (no cell map: unfiltered)") : "") +
-    (t1 + pad > clipStart + 30 ? " · capped at 30 s" : "");
-  if (clipStart < view[0] || end > view[1]) { /* keep the view; playhead may leave it */ }
+  if (BOX.new) { q.set("rec", BOX.recording); if (BOX.lane) q.set("lane", BOX.lane); }
+  au.src = `/api/audio.wav?${q}`; applySpeed(); playing = "box";
+  const end = Math.min(t1 + pad, clipStart + 30), band = `${fmt(acc[2])}–${fmt(acc[3])} kHz`;
+  $("playnote").textContent = `${what}: ${fmt(clipStart)}–${fmt(end)} s, ` +
+    (mode === "band-passed" ? band : mode === "cell mask" ? (BOX.tightened ? `kept cells within ${band}` : `${band} (no cell map)`) : "all frequencies") +
+    (t1 + pad > clipStart + 30 ? " · capped at 30 s" : "") + speedNote();
   au.play().catch(() => {});
   tick();
 }
+// play view: from the cursor (or the view's start, when the cursor is elsewhere) to the view's end, all frequencies
+const onTimeAxis = (g, x, y) => y > g.y1 && x >= g.x0 && x <= g.x1;
+function cursorT() {
+  return cursor && cursor.rec === viewRec() && cursor.t >= view[0] && cursor.t < view[1] ? cursor.t : null;
+}
+function playView() {
+  stopAudio();
+  const t0 = cursorT() ?? view[0], t1 = Math.min(view[1], t0 + META.view_play_s);
+  if (t1 - t0 < 0.05) return;
+  clipStart = t0; playEnd = t1;
+  au.src = `/api/view.wav?rec=${encodeURIComponent(viewRec())}&a=${t0}&b=${t1}`; applySpeed(); playing = "view";
+  $("playnote").textContent = `view: ${secs(t0)}–${secs(t1)}, all frequencies` +
+    (t1 < view[1] - 0.05 ? ` · ${META.view_play_s} s at a time` : "") + speedNote();
+  au.play().catch(() => {});
+  tick();
+}
+// a click on the time axis moves the cursor; while the view plays, playing goes on from there
+function setCursor(t) {
+  const resume = playing === "view" && !au.paused;
+  if (resume) { au.pause(); playing = ""; }
+  cursor = {rec: viewRec(), t: Math.max(view[0], Math.min(view[1], t))};
+  if (resume) playView(); else draw();
+}
 function tick() { draw(); if (!au.paused) requestAnimationFrame(tick); }
-function stopAudio() { au.pause(); draw(); }
-$("play").onclick = () => au.paused ? playRange(acc[0], acc[1], +$("pad").value, $("mode").value, "box") : stopAudio();
+// stopping the view part-way leaves the cursor there, so P goes on from where it stopped
+function stopAudio() {
+  if (playing === "view" && !au.paused && !au.ended) cursor = {rec: viewRec(), t: clipStart + au.currentTime};
+  au.pause(); playing = ""; draw();
+}
+function playBox() { playRange(acc[0], acc[1], 0, $("mode").value, "box"); }
+$("play").onclick = () => !au.paused && playing === "box" ? stopAudio() : playBox();
+$("playView").onclick = () => !au.paused && playing === "view" ? stopAudio() : playView();
+$("mode").addEventListener("change", () => { if (!au.paused && playing === "box") playBox(); });
 $("stop").onclick = stopAudio;
-au.addEventListener("ended", draw);
+au.addEventListener("ended", () => {
+  // a view longer than one clip: the cursor moves to where the clip ended, so P plays the rest
+  if (playing === "view" && playEnd < view[1] - 0.05) cursor = {rec: viewRec(), t: playEnd};
+  playing = ""; draw();
+});
 au.addEventListener("error", () => { $("playnote").innerHTML = `<span class="err">audio failed to load</span>`; });
 
+// ---------------- added audio (scan_audio.py) ----------------
+// the file goes up as raw bytes; the server scans it in the background (one file at a time) and
+// /api/scans says how far it is. Done: the list is reloaded, and the recording opened if the
+// reviewer has not moved to another box meanwhile
+function upload(blob, name, onProgress) {
+  return new Promise((ok, bad) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", `/api/upload?name=${encodeURIComponent(name)}`);
+    x.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
+    x.onload = () => {
+      let j;
+      try { j = JSON.parse(x.responseText); } catch { j = {error: x.statusText || "upload failed"}; }
+      if (x.status >= 400 || j.error) bad(new Error(j.error || x.statusText)); else ok(j);
+    };
+    x.onerror = () => bad(new Error("the upload failed (connection)"));
+    x.send(blob);
+  });
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const nBoxes = c => lanesOn().reduce((s, g) => s + ((c || {})[g] || 0), 0);   // the ticked groups, as the list counts
+const scanText = j => j.state === "queued" ? "queued for detection"
+  : j.state === "running" ? `detecting calls: ${j.done}/${j.total} windows`
+  : j.state === "done" ? `calls detected: ${nBoxes(j.counts)} model boxes` : `detection failed: ${j.error}`;
+async function waitScan(rec, show) {
+  for (;;) {
+    const j = (await api("/api/scans")).find(x => x.rec === rec);
+    if (!j) throw new Error(`the server has no scan of ${rec}`);
+    show(j);
+    if (j.state === "done") return j;
+    if (j.state === "error") throw new Error(scanText(j));
+    await sleep(1000);
+  }
+}
+async function refreshRecs() {
+  META = await api("/api/meta");
+  fillRecs();
+  logStat();
+}
+let addSeq = 0;
+async function addAudio(file) {
+  const st = $("addstat"), seq = ++addSeq, from = [$("rec").value, curId()];
+  const say = h => { if (seq === addSeq) st.innerHTML = h; };
+  if (file.size > META.max_upload_mb * 2 ** 20) {
+    say(`<span class="err">${esc(file.name)} is over ${META.max_upload_mb} MB: add it with scan_audio.py</span>`);
+    return;
+  }
+  try {
+    say(`uploading ${esc(file.name)} 0%`);
+    const r = await upload(file, file.name, p => say(`uploading ${esc(file.name)} ${Math.round(p * 100)}%`));
+    const pre = r.created ? esc(r.rec) : `already added as ${esc(r.rec)}`;
+    await waitScan(r.rec, j => say(`${pre}: ${esc(scanText(j))}`));
+    await refreshRecs();
+    if ($("rec").value === from[0] && curId() === from[1]) {
+      $("rec").value = r.rec;
+      await loadRec("");
+      say(`${pre}: ${esc(scanText((await api("/api/scans")).find(x => x.rec === r.rec)))}`);
+    } else {
+      say(`${pre} is ready: <button id="openAdded">open it</button>`);
+      $("openAdded").onclick = () => { $("rec").value = r.rec; loadRec(""); say(""); };
+    }
+  } catch (e) { say(`<span class="err">${esc(e.message)}</span>`); }
+}
+// scans still running when the page (re)loads: follow them, refresh the list when each is done
+async function resumeScans() {
+  try {
+    for (const j of (await api("/api/scans")).filter(x => x.state === "queued" || x.state === "running")) {
+      const seq = addSeq, say = h => { if (seq === addSeq) $("addstat").innerHTML = h; };
+      waitScan(j.rec, x => say(`${esc(j.rec)}: ${esc(scanText(x))}`))
+        .then(refreshRecs).catch(e => say(`<span class="err">${esc(e.message)}</span>`));
+    }
+  } catch {}
+}
+$("addAudio").onclick = () => $("addFile").click();
+$("addFile").onchange = () => { const f = $("addFile").files[0]; $("addFile").value = ""; if (f) addAudio(f); };
+
 // ---------------- header controls, keys ----------------
-$("rec").onchange = () => loadRec(0);
-$("lanes").addEventListener("change", () => { store.set("lanes", JSON.stringify(lanesOn())); fillRecs(); loadRec(BOXES[cur] ? BOXES[cur].n : 0); });
-$("kappa").onchange = () => { store.set("kappa", $("kappa").value); loadRec(BOXES[cur] ? BOXES[cur].n : 0); };
+const curId = () => BOXES[cur] ? BOXES[cur].id : "";
+$("rec").onchange = () => loadRec("");
+$("lanes").addEventListener("change", () => { store.set("lanes", JSON.stringify(lanesOn())); fillRecs(); loadRec(curId()); });
+$("sources").addEventListener("change", () => { store.set("sources", JSON.stringify(sourcesOn())); loadRec(curId()); });
+$("kappa").onchange = () => { store.set("kappa", $("kappa").value); loadRec(curId()); };
 $("reviewer").onchange = () => store.set("reviewer", $("reviewer").value.trim());
 $("list").addEventListener("click", e => { const r = e.target.closest(".row"); if (r) select(+r.dataset.i); });
 document.addEventListener("keydown", e => {
   if (e.key === "Enter" && e.ctrlKey) { accept(); e.preventDefault(); return; }
   if (e.target.matches("input[type=text], input:not([type]), input[type=number], textarea, select")) return;
   const k = e.key.toLowerCase();
-  if (k === "y" || k === "n" || k === "u") { decision = {y: "yes", n: "no", u: "unknown"}[k]; renderDecision(); }
-  else if (k >= "1" && k <= "5" && PRED && PRED.top[+k - 1]) {
+  if ((k === "y" || k === "n" || k === "u") && !isAudit()) { decision = {y: "yes", n: "no", u: "unknown"}[k]; renderDecision(); }
+  else if (k === "b") { startNew(); }
+  else if (k === "escape" && BOX && BOX.new) { cancelNew(); }
+  else if (k >= "1" && k <= "5" && PRED && PRED.top[+k - 1] && !isAudit()) {
     const t = PRED.top[+k - 1], on = species.some(s => s.name.toLowerCase() === t.name.toLowerCase());
-    toggleSpecies(t.name, "top" + k, !on);
+    toggleSpecies(t.name, "top" + k, !on, t.common);
   }
   else if (k === " ") { $("play").click(); }
+  else if (k === "p") { $("playView").click(); }
   else if (k === "arrowright") { select(cur + 1); }
   else if (k === "arrowleft") { select(cur - 1); }
   else if (k === "j") { nextUnreviewed(); }
+  else if ((k === "[" || k === "pageup") && minuteMode()) { gotoMinute(MIN - 1); }
+  else if ((k === "]" || k === "pagedown") && minuteMode()) { gotoMinute(MIN + 1); }
   else return;
   e.preventDefault();
 });

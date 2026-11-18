@@ -1,0 +1,792 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audio Editor</title>
+<style>
+:root {
+  --bg: #f6f6f3; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #dcdcd6;
+  --accent: #2458c6; --no: #c0392b; --sel: #e8eefb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #20201e; --ink: #ecece8; --muted: #9b9b94; --line: #3a3a36;
+    --accent: #7ea3f2; --no: #ef6b5e; --sel: #27324a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 8px 14px;
+  background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 15px; margin: 0 6px 0 0; }
+label.inl { display: inline-flex; gap: 5px; align-items: center; }
+select, input, button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
+select, input { padding: 3px 6px; }
+button { padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.rec { color: var(--no); font-weight: 600; }
+button.rec.on { background: var(--no); color: #fff; border-color: var(--no); }
+button:disabled { opacity: .45; cursor: default; }
+main { padding: 12px 14px; max-width: 1600px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.small { font-size: 12px; color: var(--muted); }
+#detstat a { color: var(--accent); }
+.err { color: var(--no); }
+.bar { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 8px; }
+#wrap { position: relative; margin-top: 6px; }
+#spec { width: 100%; height: 380px; display: block; background: #000; border-radius: 4px; cursor: text; touch-action: none; }
+#overview { width: 100%; height: 46px; display: block; margin-top: 4px; background: #111; border-radius: 4px; cursor: pointer; touch-action: none; }
+#readout { position: absolute; top: 8px; right: 10px; padding: 2px 7px; border-radius: 4px; pointer-events: none;
+  background: rgba(0,0,0,.66); color: #f2f2f2; font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre; display: none; }
+#drop { position: fixed; inset: 0; background: rgba(36,88,198,.18); border: 3px dashed var(--accent); display: none; z-index: 20;
+  align-items: center; justify-content: center; font-size: 20px; font-weight: 600; }
+#seltxt, #info { font-variant-numeric: tabular-nums; }
+kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+details summary { cursor: pointer; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Audio editor</h1>
+  <label class="inl"><button id="openBtn">open file…</button><input type="file" id="file" accept="audio/*,.wav" hidden></label>
+  <button id="recBtn" class="rec" title="record from the microphone (R); stop to put it in the file">● record <kbd>R</kbd></button>
+  <span id="info" class="small">no file open: open one, drop one here, or record</span>
+  <span style="flex:1"></span>
+  <label class="inl">save as <input id="saveName" style="width:220px" placeholder="name.wav"></label>
+  <select id="saveFmt"><option value="pcm16">16-bit PCM</option><option value="float32">32-bit float</option></select>
+  <button id="save" class="primary" disabled>save WAV</button>
+  <button id="detect" disabled title="send this file to the review app: the zero-shot model detects calls on it and it joins the box review list (stored in data/uploads)">detect calls</button>
+  <span class="small" id="detstat"></span>
+  <a href="/" class="small">back to box review</a>
+</header>
+<main>
+  <div class="card">
+    <div class="small">Opening a file reads it in this browser tab; <i>save WAV</i> downloads the edited copy,
+      and nothing is written to the project. <i>detect calls</i> is the one exception: it sends the file
+      (the original bytes if unedited, else the edit as a 32-bit float WAV) to data/uploads, where the
+      zero-shot model runs on it and the box review lists it. Answers given there are logged as usual;
+      the learners leave added recordings out.</div>
+    <div id="wrap"><canvas id="spec"></canvas><div id="readout"></div></div>
+    <canvas id="overview" title="the whole file: click or drag to move the view"></canvas>
+    <div class="bar">
+      <button id="panL" title="pan left">◀</button><button id="zoomOut" title="zoom out">−</button>
+      <button id="zoomIn" title="zoom in">+</button><button id="panR" title="pan right">▶</button>
+      <button id="zoomAll" title="the whole file">whole file</button>
+      <button id="zoomSel" title="zoom to the selection">fit selection</button>
+      <label class="inl">to <select id="fview"></select> kHz</label>
+    </div>
+    <div class="bar">
+      <label class="inl" title="higher shows fainter sounds">brightness <input type="range" id="bright" min="0" max="100" value="50"></label>
+      <label class="inl" title="higher: fewer dB from quiet to loud">contrast <input type="range" id="contrast" min="0" max="100" value="50"></label>
+      <label class="inl">colours <select id="cmap"><option value="grey">grey</option><option value="grey dark">grey, dark</option>
+        <option value="viridis">viridis</option><option value="magma">magma</option></select></label>
+      <label class="inl" title="STFT window: shorter = sharper in time, longer = sharper in frequency">window
+        <select id="nfft"><option>256</option><option>512</option><option selected>1024</option><option>2048</option><option>4096</option></select> points</label>
+      <span class="small" id="dispnote"></span>
+    </div>
+    <div class="bar">
+      <button id="cut" title="cut the selection to the clipboard (Ctrl+X)">cut</button>
+      <button id="copy" title="copy the selection (Ctrl+C)">copy</button>
+      <button id="paste" title="paste over the selection, or at the cursor (Ctrl+V)">paste</button>
+      <button id="del" title="delete the selection (Del)">delete</button>
+      <button id="undo" title="undo (Ctrl+Z)">↶ undo</button><button id="redo" title="redo (Ctrl+Y or Ctrl+Shift+Z)">↷ redo</button>
+      <span class="small" id="seltxt"></span>
+    </div>
+    <div class="bar">
+      <button id="play" class="primary" title="play the selection, or from the cursor to the end (Space)">▶ play <kbd>Space</kbd></button>
+      <button id="stop">■</button>
+      <label class="inl" title="slower plays lower, as on tape">speed <select id="speed"><option value="2">2×</option><option value="1" selected>1×</option>
+        <option value="0.5">½×</option><option value="0.25">¼×</option><option value="0.125">⅛×</option></select></label>
+      <span class="small" id="status"></span>
+    </div>
+    <details style="margin-top:6px"><summary>How it works</summary><div class="small">
+      Drag on the spectrogram to select a stretch of time (all frequencies); drag a yellow edge to move it;
+      click to put the cursor there. <kbd>Ctrl+X</kbd>/<kbd>Ctrl+C</kbd>/<kbd>Ctrl+V</kbd> cut, copy, paste
+      (paste replaces the selection, else goes in at the cursor) · <kbd>Del</kbd> deletes the selection ·
+      <kbd>Ctrl+Z</kbd>/<kbd>Ctrl+Y</kbd> undo/redo · <kbd>Ctrl+A</kbd> select all · <kbd>Esc</kbd> clear the selection ·
+      <kbd>Space</kbd> play/stop · <kbd>R</kbd> record/stop.<br>
+      <b>Wheel</b> zooms in time about the mouse · <kbd>Shift</kbd>+wheel pans · <kbd>Shift</kbd>+drag or middle-button
+      drag pans · the box at the top right reads the time, frequency and level under the mouse.<br>
+      A recording goes in like a paste: over the selection, else at the cursor; with no file open it becomes a new
+      file. The microphone is read raw (no echo cancelling, noise suppression or automatic gain). A clip at another
+      sample rate is resampled to the file's rate; mono and stereo are matched to the file's channels.
+      WAV files are read at their own sample rate; other formats are decoded by the browser at its rate.
+      The clipboard lives in this tab only. Undo keeps up to 50 M samples of changes.</div></details>
+  </div>
+</main>
+<div id="drop">drop an audio file to open it</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+
+// ---------------- document: channels of Float32 samples at sr; every change bumps ver ----------------
+let doc = null;                 // {name, sr, chans: Float32Array[], ver, edited}
+let sel = null;                 // {a, b} samples, a < b
+let cursor = 0;                 // samples
+let clip = null;                // {sr, chans}
+let undoStack = [], redoStack = [];
+const UNDO_CAP = 50e6;          // samples kept for undo, all channels
+let view = [0, 1];              // seconds
+const N = () => doc ? doc.chans[0].length : 0;
+const SR = () => doc ? doc.sr : 48000;
+const dur = () => N() / SR();
+const nyq = () => SR() / 2000;  // kHz
+let monoCache = null, VER = 0;  // versions never repeat across files, so a cache keyed on ver cannot serve the last file
+let lastDur = 0;                // the duration before an edit: a view showing the whole file keeps showing it
+function mono() {
+  if (monoCache && monoCache.ver === doc.ver) return monoCache.x;
+  let x = doc.chans[0];
+  if (doc.chans.length > 1) {
+    x = new Float32Array(N());
+    for (const c of doc.chans) for (let i = 0; i < x.length; i++) x[i] += c[i] / doc.chans.length;
+  }
+  monoCache = {ver: doc.ver, x};
+  return x;
+}
+function setDoc(d, msg) {
+  stop();
+  doc = {...d, ver: ++VER, edited: false};
+  sel = null; cursor = 0; undoStack = []; redoStack = [];
+  $("saveName").value = d.name.replace(/\.[^.]*$/, "") + (d.recorded ? ".wav" : "_edit.wav");
+  fillFview();
+  view = [0, Math.max(0.05, dur())]; lastDur = dur();
+  spec = null; env = null; monoCache = null;
+  say(msg || "");
+  refresh();
+}
+function docChanged() {
+  doc.ver = ++VER; doc.edited = true; doc.changed = true;   // changed: no longer the bytes opened (saving keeps it)
+  const n = N();
+  cursor = Math.min(cursor, n);
+  if (sel) { sel.a = Math.min(sel.a, n); sel.b = Math.min(sel.b, n); if (sel.b - sel.a < 1) sel = null; }
+  const wasAll = view[0] <= 1e-9 && view[1] >= lastDur - 1e-9, d = dur(); lastDur = d;
+  const w = wasAll ? Math.max(0.05, d) : Math.min(view[1] - view[0], Math.max(0.05, d));
+  view = [Math.max(0, Math.min(view[0], d - w)), 0]; view[1] = view[0] + w;
+  refresh();
+}
+function refresh() { info(); selText(); buttons(); setView(view); }
+function info() {
+  if (!doc) { $("info").textContent = "no file open: open one, drop one here, or record"; return; }
+  $("info").textContent = `${doc.name} · ${doc.sr} Hz · ${doc.chans.length === 1 ? "mono" : doc.chans.length + " channels"} · ` +
+    `${tstr(dur())}${doc.edited ? " · edited, not saved" : ""}`;
+}
+const say = (s, err) => { $("status").innerHTML = err ? `<span class="err">${esc(s)}</span>` : esc(s); };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const tstr = t => { const m = Math.floor(t / 60); return `${m}:${(t - 60 * m).toFixed(3).padStart(6, "0")}`; };
+
+// ---------------- edits: one splice, undone by the opposite splice ----------------
+function spliceDoc(pos, del, ins) {
+  const removed = doc.chans.map(c => c.slice(pos, pos + del)), m = ins ? ins[0].length : 0;
+  doc.chans = doc.chans.map((c, k) => {
+    const o = new Float32Array(c.length - del + m);
+    o.set(c.subarray(0, pos)); if (m) o.set(ins[k], pos); o.set(c.subarray(pos + del), pos + m);
+    return o;
+  });
+  return removed;
+}
+const size = chans => chans.length * chans[0].length;
+function edit(pos, del, ins, what) {
+  stop();
+  const empty = doc.chans.map(() => new Float32Array(0)), removed = spliceDoc(pos, del, ins);
+  undoStack.push({pos, removed, inserted: ins || empty, what}); redoStack = [];
+  let total = undoStack.reduce((s, u) => s + size(u.removed) + size(u.inserted), 0);
+  while (undoStack.length > 1 && total > UNDO_CAP) { const u = undoStack.shift(); total -= size(u.removed) + size(u.inserted); }
+  const m = ins ? ins[0].length : 0;
+  sel = m ? {a: pos, b: pos + m} : null; cursor = pos + m;
+  docChanged();
+  say(`${what}: ${(del / doc.sr).toFixed(3)} s out, ${(m / doc.sr).toFixed(3)} s in`);
+}
+function undo() {
+  const u = undoStack.pop(); if (!u) return;
+  stop(); spliceDoc(u.pos, u.inserted[0].length, u.removed); redoStack.push(u);
+  const m = u.removed[0].length; sel = m ? {a: u.pos, b: u.pos + m} : null; cursor = u.pos;
+  docChanged(); say(`undid ${u.what}`);
+}
+function redo() {
+  const u = redoStack.pop(); if (!u) return;
+  stop(); spliceDoc(u.pos, u.removed[0].length, u.inserted); undoStack.push(u);
+  const m = u.inserted[0].length; sel = m ? {a: u.pos, b: u.pos + m} : null; cursor = u.pos + m;
+  docChanged(); say(`redid ${u.what}`);
+}
+const selChans = () => doc.chans.map(c => c.slice(sel.a, sel.b));
+function copySel() { if (!doc || !sel) return; clip = {sr: doc.sr, chans: selChans()}; say(`copied ${((sel.b - sel.a) / doc.sr).toFixed(3)} s`); buttons(); }
+function cutSel() { if (!doc || !sel) return; clip = {sr: doc.sr, chans: selChans()}; edit(sel.a, sel.b - sel.a, null, "cut"); }
+function delSel() { if (doc && sel) edit(sel.a, sel.b - sel.a, null, "delete"); }
+async function paste() { if (clip) await putIn(clip, "paste", "clipboard"); }
+// a clip goes in over the selection, else at the cursor; with no file open it becomes the file
+async function putIn(c, what, name) {
+  if (!doc) return setDoc({name, sr: c.sr, chans: c.chans.map(x => x.slice()), recorded: what === "record"});
+  const chans = await conform(c, doc.sr, doc.chans.length);
+  if (!chans[0].length) return;
+  if (sel) edit(sel.a, sel.b - sel.a, chans, what); else edit(cursor, 0, chans, what);
+}
+// to the file's rate (OfflineAudioContext resampler) and channel count (mono -> copies, more -> mix)
+async function conform(c, sr, nch) {
+  let x = c.chans;
+  if (c.sr !== sr && x[0].length) {
+    const n = Math.max(1, Math.round(x[0].length * sr / c.sr)), oc = new OfflineAudioContext(x.length, n, sr);
+    const b = oc.createBuffer(x.length, x[0].length, c.sr); x.forEach((ch, k) => b.copyToChannel(ch, k));
+    const s = oc.createBufferSource(); s.buffer = b; s.connect(oc.destination); s.start();
+    const r = await oc.startRendering(); x = [...Array(r.numberOfChannels)].map((_, k) => r.getChannelData(k).slice());
+  }
+  if (x.length === nch) return x;
+  if (x.length === 1) return [...Array(nch)].map(() => x[0].slice());
+  const m = new Float32Array(x[0].length); x.forEach(ch => { for (let i = 0; i < m.length; i++) m[i] += ch[i] / x.length; });
+  return [...Array(nch)].map(() => m.slice());
+}
+
+// ---------------- files: WAV parsed here (its own rate, every sample); anything else by the browser ----------------
+function parseWav(ab) {
+  const v = new DataView(ab), tag4 = o => String.fromCharCode(...new Uint8Array(ab, o, 4));
+  if (ab.byteLength < 44 || tag4(0) !== "RIFF" || tag4(8) !== "WAVE") return null;
+  let p = 12, fmt = null, data = null;
+  while (p + 8 <= ab.byteLength) {
+    const id = tag4(p), sz = v.getUint32(p + 4, true);
+    if (id === "fmt ") {
+      fmt = {tag: v.getUint16(p + 8, true), ch: v.getUint16(p + 10, true), sr: v.getUint32(p + 12, true), bits: v.getUint16(p + 22, true)};
+      if (fmt.tag === 0xFFFE && sz >= 26) fmt.tag = v.getUint16(p + 32, true);   // extensible: the sub-format
+    } else if (id === "data") { data = {off: p + 8, len: Math.min(sz, ab.byteLength - p - 8)}; break; }
+    p += 8 + sz + (sz & 1);
+  }
+  if (!fmt || !data || !fmt.ch) return null;
+  const B = fmt.bits / 8, n = Math.floor(data.len / (B * fmt.ch)), chans = [...Array(fmt.ch)].map(() => new Float32Array(n));
+  const rd = fmt.tag === 3 && B === 4 ? o => v.getFloat32(o, true) : fmt.tag === 3 && B === 8 ? o => v.getFloat64(o, true)
+    : fmt.tag === 1 && B === 2 ? o => v.getInt16(o, true) / 32768 : fmt.tag === 1 && B === 4 ? o => v.getInt32(o, true) / 2147483648
+    : fmt.tag === 1 && B === 3 ? o => ((v.getUint8(o) | v.getUint8(o + 1) << 8 | v.getInt8(o + 2) << 16)) / 8388608
+    : fmt.tag === 1 && B === 1 ? o => (v.getUint8(o) - 128) / 128 : null;
+  if (!rd) return null;
+  for (let i = 0, o = data.off; i < n; i++) for (let k = 0; k < fmt.ch; k++, o += B) chans[k][i] = rd(o);
+  return {sr: fmt.sr, chans, bits: fmt.bits, float: fmt.tag === 3};
+}
+async function openBuffer(name, ab) {
+  if (doc && doc.edited && !confirm(`${doc.name} has edits that are not saved. Open ${name} anyway?`)) return;
+  const w = parseWav(ab);
+  if (w) return setDoc({name, sr: w.sr, chans: w.chans, src: ab}, `opened: ${w.float ? "float" : "PCM"} ${w.bits}-bit WAV`);
+  try {
+    const ac = new AudioContext(), b = await ac.decodeAudioData(ab.slice(0)); ac.close();
+    setDoc({name, sr: b.sampleRate, chans: [...Array(b.numberOfChannels)].map((_, k) => b.getChannelData(k).slice()), src: ab},
+           `opened: decoded by the browser at ${b.sampleRate} Hz (the file's own rate may differ)`);
+  } catch (e) { say(`cannot read ${name}: ${e.message || e}`, true); }
+}
+async function openFile(f) { if (f) await openBuffer(f.name, await f.arrayBuffer()); }
+$("openBtn").onclick = () => $("file").click();
+$("file").onchange = () => { openFile($("file").files[0]); $("file").value = ""; };
+let dragN = 0;
+window.addEventListener("dragenter", e => { if ([...e.dataTransfer.types].includes("Files")) { dragN++; $("drop").style.display = "flex"; } });
+window.addEventListener("dragleave", () => { if (--dragN <= 0) { dragN = 0; $("drop").style.display = "none"; } });
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => { e.preventDefault(); dragN = 0; $("drop").style.display = "none"; openFile(e.dataTransfer.files[0]); });
+// 16-bit: x * 32768 rounded and clipped, so a 16-bit file opened and saved unedited comes back sample for sample
+function encodeWav(chans, sr, float) {
+  const nch = chans.length, n = chans[0].length, B = float ? 4 : 2, len = n * nch * B;
+  const ab = new ArrayBuffer(44 + len), v = new DataView(ab), s = (o, t) => { for (let i = 0; i < 4; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  s(0, "RIFF"); v.setUint32(4, 36 + len, true); s(8, "WAVE"); s(12, "fmt "); v.setUint32(16, 16, true);
+  v.setUint16(20, float ? 3 : 1, true); v.setUint16(22, nch, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * nch * B, true); v.setUint16(32, nch * B, true); v.setUint16(34, 8 * B, true);
+  s(36, "data"); v.setUint32(40, len, true);
+  let o = 44;
+  for (let i = 0; i < n; i++) for (let k = 0; k < nch; k++, o += B) {
+    if (float) v.setFloat32(o, chans[k][i], true);
+    else v.setInt16(o, Math.max(-32768, Math.min(32767, Math.round(chans[k][i] * 32768))), true);
+  }
+  return new Blob([ab], {type: "audio/wav"});
+}
+$("save").onclick = () => {
+  if (!doc || !N()) return;
+  let name = $("saveName").value.trim() || "edit.wav";
+  if (!/\.wav$/i.test(name)) name += ".wav";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(encodeWav(doc.chans, doc.sr, $("saveFmt").value === "float32"));
+  a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  doc.edited = false; info(); say(`saved ${name} (${$("saveFmt").selectedOptions[0].textContent}) to your downloads`);
+};
+window.addEventListener("beforeunload", e => { if (doc && doc.edited) { e.preventDefault(); e.returnValue = ""; } });
+
+// ---------------- microphone: raw PCM through an AudioWorklet ----------------
+const TAP = `class Tap extends AudioWorkletProcessor {
+  process(inputs) { const c = inputs[0]; if (c && c.length) this.port.postMessage(c.map(x => x.slice(0))); return true; }
+}
+registerProcessor("tap", Tap);`;
+let recState = null;            // {ctx, stream, chunks, t0, peak}
+async function recStart() {
+  if (recState) return;
+  stop();
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: false, noiseSuppression: false, autoGainControl: false}});
+  } catch (e) { return say(`no microphone: ${e.message || e}`, true); }
+  let ctx, src;
+  try { ctx = new AudioContext(doc ? {sampleRate: doc.sr} : {}); src = ctx.createMediaStreamSource(stream); }
+  catch { if (ctx) ctx.close(); ctx = new AudioContext(); src = ctx.createMediaStreamSource(stream); }   // resampled at the end
+  const url = URL.createObjectURL(new Blob([TAP], {type: "application/javascript"}));
+  await ctx.audioWorklet.addModule(url); URL.revokeObjectURL(url);
+  const node = new AudioWorkletNode(ctx, "tap"), mute = ctx.createGain();
+  mute.gain.value = 0; src.connect(node); node.connect(mute); mute.connect(ctx.destination);   // pulled, not heard
+  recState = {ctx, stream, chunks: [], t0: performance.now(), peak: 0, n: 0};
+  node.port.onmessage = e => {
+    if (!recState) return;
+    recState.chunks.push(e.data); recState.n += e.data[0].length;
+    for (const x of e.data[0]) { const a = Math.abs(x); if (a > recState.peak) recState.peak = a; }
+  };
+  $("recBtn").classList.add("on"); $("recBtn").innerHTML = "■ stop recording <kbd>R</kbd>";
+  recTick();
+}
+function recTick() {
+  if (!recState) return;
+  const r = recState, db = r.peak > 0 ? (20 * Math.log10(r.peak)).toFixed(0) : "−∞";
+  say(`recording ${tstr(r.n / r.ctx.sampleRate)} at ${r.ctx.sampleRate} Hz · peak ${db} dBFS`);
+  setTimeout(recTick, 200);
+}
+async function recStop() {
+  const r = recState; if (!r) return;
+  recState = null;
+  r.stream.getTracks().forEach(t => t.stop());
+  const sr = r.ctx.sampleRate; await r.ctx.close();
+  $("recBtn").classList.remove("on"); $("recBtn").innerHTML = "● record <kbd>R</kbd>";
+  if (!r.n) return say("nothing was recorded", true);
+  const nch = Math.max(...r.chunks.map(c => c.length)), chans = [...Array(nch)].map(() => new Float32Array(r.n));
+  let o = 0;
+  for (const c of r.chunks) { for (let k = 0; k < nch; k++) chans[k].set(c[Math.min(k, c.length - 1)], o); o += c[0].length; }
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+  await putIn({sr, chans}, "record", `recording_${stamp}`);
+  say(`recorded ${(r.n / sr).toFixed(2)} s at ${sr} Hz${doc && doc.sr !== sr ? `, resampled to ${doc.sr} Hz` : ""}`);
+}
+$("recBtn").onclick = () => recState ? recStop() : recStart();
+
+// ---------------- spectrogram: computed here for the view; grey dB like the review page ----------------
+const PLANS = {};
+function plan(n) {
+  if (PLANS[n]) return PLANS[n];
+  const bits = Math.log2(n), rev = new Uint32Array(n), cos = new Float64Array(n / 2), sin = new Float64Array(n / 2), win = new Float64Array(n);
+  for (let i = 0; i < n; i++) { let r = 0; for (let b = 0; b < bits; b++) r |= ((i >> b) & 1) << (bits - 1 - b); rev[i] = r; }
+  for (let i = 0; i < n / 2; i++) { cos[i] = Math.cos(2 * Math.PI * i / n); sin[i] = -Math.sin(2 * Math.PI * i / n); }
+  for (let i = 0; i < n; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / n);
+  return PLANS[n] = {n, rev, cos, sin, win, re: new Float64Array(n), im: new Float64Array(n)};
+}
+// power spectrum of the Hann-windowed frame x[start .. start+n) (zeros outside), max-accumulated into out
+function powerInto(x, start, P, out) {
+  const {n, rev, cos, sin, win, re, im} = P;
+  for (let i = 0; i < n; i++) { const j = start + i; re[rev[i]] = j >= 0 && j < x.length ? x[j] * win[i] : 0; im[rev[i]] = 0; }
+  for (let size = 2; size <= n; size <<= 1) {
+    const half = size >> 1, step = n / size;
+    for (let i = 0; i < n; i += size) for (let j = 0, k = 0; j < half; j++, k += step) {
+      const a = i + j, b = a + half, tr = re[b] * cos[k] - im[b] * sin[k], ti = re[b] * sin[k] + im[b] * cos[k];
+      re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+    }
+  }
+  for (let k = 0; k < n / 2; k++) { const p = re[k] * re[k] + im[k] * im[k]; if (p > out[k]) out[k] = p; }
+}
+const RANGE_DB = 120, MAX_FRAMES = 16;   // frames per column at most: a long view samples them, it does not read every one
+let spec = null, specTimer = 0;         // {key, view, cols, nb, grey, canvas}
+const specKeyNow = () => `${doc ? doc.ver : 0}|${view[0]}|${view[1]}|${$("nfft").value}|${plotCols()}`;
+const plotCols = () => Math.max(50, Math.min(2000, Math.round(cv.clientWidth - PADL - 6)));
+function computeSpec() {
+  if (!doc || !N()) { spec = null; return; }
+  const key = specKeyNow(); if (spec && spec.key === key) return;
+  const P = plan(+$("nfft").value), n = P.n, nb = n / 2, cols = plotCols(), x = mono(), sr = doc.sr;
+  const a = view[0] * sr, spc = (view[1] - view[0]) * sr / cols, k = spc <= n ? 1 : Math.min(MAX_FRAMES, Math.ceil(spc / n));
+  const db = new Float32Array(cols * nb), acc = new Float64Array(nb);
+  for (let c = 0; c < cols; c++) {
+    acc.fill(0);
+    for (let j = 0; j < k; j++) powerInto(x, Math.round(a + (c + (j + 0.5) / k) * spc - n / 2), P, acc);
+    for (let b = 0; b < nb; b++) db[(nb - 1 - b) * cols + c] = 10 * Math.log10(acc[b] + 1e-20);
+  }
+  const step = Math.max(1, Math.floor(db.length / 40000)), s = [];
+  for (let i = 0; i < db.length; i += step) s.push(db[i]);
+  s.sort((p, q) => p - q);
+  const vmax = s[Math.floor(0.999 * (s.length - 1))], grey = new Uint8Array(db.length);
+  for (let i = 0; i < db.length; i++) grey[i] = Math.round(Math.max(0, Math.min(1, (vmax - db[i]) / RANGE_DB)) * 255);
+  spec = {key, view: view.slice(), cols, nb, grey, canvas: null};
+  colourise();
+}
+const CMAPS = {
+  "grey": ["#ffffff", "#000000"], "grey dark": ["#000000", "#ffffff"],
+  viridis: ["#440154", "#482878", "#3e4989", "#31688e", "#26828e", "#1f9e89", "#35b779", "#6ece58", "#b5de2b", "#fde725"],
+  magma: ["#000004", "#180f3d", "#440f76", "#721f81", "#9e2f7f", "#cd4071", "#f1605d", "#fd9668", "#feca8d", "#fcfdbf"],
+};
+const dbSpan = c => c <= 50 ? 120 - 0.8 * c : 80 - (c - 50);
+const dbTop = b => (b - 50) * 0.6;
+let LUT = null, quietCss = "#fff";
+function makeLut() {
+  const R = dbSpan(+$("contrast").value), top = dbTop(+$("bright").value);
+  const rgb = (CMAPS[$("cmap").value] || CMAPS.grey).map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
+  LUT = new Uint8ClampedArray(256 * 3);
+  for (let g = 0; g < 256; g++) {
+    const db = -RANGE_DB * g / 255, v = Math.max(0, Math.min(1, (db + top + R) / R));
+    const p = v * (rgb.length - 1), i = Math.min(rgb.length - 2, Math.floor(p)), f = p - i;
+    for (let k = 0; k < 3; k++) LUT[3 * g + k] = rgb[i][k] + (rgb[i + 1][k] - rgb[i][k]) * f;
+  }
+  quietCss = `rgb(${LUT[765]},${LUT[766]},${LUT[767]})`;
+}
+function colourise() {
+  if (!spec) return;
+  if (!LUT) makeLut();
+  const c = spec.canvas || document.createElement("canvas");
+  c.width = spec.cols; c.height = spec.nb;
+  const x = c.getContext("2d"), d = x.createImageData(spec.cols, spec.nb), p = d.data, g = spec.grey;
+  for (let i = 0; i < g.length; i++) { const j = 3 * g[i], o = 4 * i; p[o] = LUT[j]; p[o + 1] = LUT[j + 1]; p[o + 2] = LUT[j + 2]; p[o + 3] = 255; }
+  x.putImageData(d, 0, 0);
+  spec.canvas = c;
+}
+function dispNote() {
+  const R = dbSpan(+$("contrast").value), top = dbTop(+$("bright").value), n = +$("nfft").value, sr = SR();
+  const sg = v => (v > 0 ? "+" : "") + v.toFixed(0);
+  $("dispnote").textContent = `colour scale ${sg(-top)} to ${sg(-top - R)} dB re the view's loudest · window ${(n / sr * 1000).toFixed(1)} ms, ${(sr / n).toFixed(0)} Hz bins`;
+}
+["bright", "contrast", "cmap"].forEach(id => $(id).addEventListener("input", () => { makeLut(); colourise(); dispNote(); draw(); }));
+$("nfft").addEventListener("change", () => { dispNote(); setView(view); });
+function fillFview() {
+  const v = $("fview").value, ny = nyq(), opts = [4, 8, 12, 16, 24].filter(k => k < ny);
+  $("fview").innerHTML = opts.map(k => `<option>${k}</option>`).join("") + `<option value="all">${+ny.toFixed(2)} (all)</option>`;
+  $("fview").value = [...$("fview").options].some(o => o.value === v) ? v : "all";
+}
+$("fview").addEventListener("change", draw);
+
+// ---------------- view ----------------
+const MIN_W = 0.05, LAZY_MS = 120;
+function setView(v, lazy = false) {
+  const d = dur();
+  let [a, b] = v; const w = Math.max(Math.min(MIN_W, d || MIN_W), Math.min(b - a, d || MIN_W));
+  a = Math.max(0, Math.min(a, d - w));
+  view = [a, a + w];
+  clearTimeout(specTimer);
+  if (lazy && (!spec || spec.key !== specKeyNow())) { draw(); specTimer = setTimeout(() => { computeSpec(); draw(); }, LAZY_MS); return; }
+  computeSpec(); draw();
+}
+function zoomAbout(t, factor) {
+  const w = view[1] - view[0], nw = Math.max(MIN_W, Math.min(dur(), w * factor));
+  if (Math.abs(nw - w) < 1e-12) return;
+  const a = t - (t - view[0]) * nw / w;
+  setView([a, a + nw], true);
+}
+$("panL").onclick = () => { const w = view[1] - view[0]; setView([view[0] - .75 * w, view[1] - .75 * w]); };
+$("panR").onclick = () => { const w = view[1] - view[0]; setView([view[0] + .75 * w, view[1] + .75 * w]); };
+$("zoomIn").onclick = () => zoomAbout((view[0] + view[1]) / 2, 0.5);
+$("zoomOut").onclick = () => zoomAbout((view[0] + view[1]) / 2, 2);
+$("zoomAll").onclick = () => setView([0, dur()]);
+$("zoomSel").onclick = () => { if (sel) { const a = sel.a / SR(), b = sel.b / SR(), p = (b - a) * 0.05; setView([a - p, b + p]); } };
+
+// ---------------- drawing ----------------
+const cv = $("spec"), ctx = cv.getContext("2d"), PADL = 42, PADB = 22, EDGE = 6;
+function geom() {
+  const W = cv.clientWidth, H = cv.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const fv = $("fview").value === "all" ? nyq() : Math.min(nyq(), +$("fview").value);
+  return {W, H, x0: PADL, x1: W - 6, y0: 6, y1: H - PADB, fv};
+}
+const tx = (g, t) => g.x0 + (t - view[0]) / (view[1] - view[0]) * (g.x1 - g.x0);
+const xt = (g, x) => view[0] + (x - g.x0) / (g.x1 - g.x0) * (view[1] - view[0]);
+const fy = (g, f) => g.y1 - f / g.fv * (g.y1 - g.y0);
+const yf = (g, y) => (g.y1 - y) / (g.y1 - g.y0) * g.fv;
+function draw() {
+  const g = geom();
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, g.W, g.H);
+  if (!doc) {
+    ctx.fillStyle = "#aaa"; ctx.font = "14px system-ui";
+    ctx.fillText("open a file, drop one here, or record", g.x0 + 12, (g.y0 + g.y1) / 2);
+    return drawOverview();
+  }
+  ctx.fillStyle = quietCss; ctx.fillRect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0);
+  ctx.save(); ctx.beginPath(); ctx.rect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0); ctx.clip();
+  if (spec && spec.canvas) {
+    const sh = spec.nb * Math.min(1, g.fv / nyq());
+    ctx.imageSmoothingEnabled = spec.cols < g.x1 - g.x0;
+    ctx.drawImage(spec.canvas, 0, spec.nb - sh, spec.cols, sh, tx(g, spec.view[0]), g.y0, tx(g, spec.view[1]) - tx(g, spec.view[0]), g.y1 - g.y0);
+  }
+  if (sel) {
+    const X0 = tx(g, sel.a / doc.sr), X1 = tx(g, sel.b / doc.sr);
+    ctx.fillStyle = "rgba(255,212,0,.16)"; ctx.fillRect(X0, g.y0, X1 - X0, g.y1 - g.y0);
+    ctx.strokeStyle = "#ffd400"; ctx.lineWidth = 1.5;
+    for (const X of [X0, X1]) { ctx.beginPath(); ctx.moveTo(X, g.y0); ctx.lineTo(X, g.y1); ctx.stroke(); }
+  }
+  const cx = tx(g, cursor / doc.sr);
+  ctx.strokeStyle = "#1e90ff"; ctx.lineWidth = 1.2; ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(cx, g.y0); ctx.lineTo(cx, g.y1); ctx.stroke(); ctx.setLineDash([]);
+  const ph = playheadT();
+  if (ph != null) { const x = tx(g, ph); ctx.strokeStyle = "#e00"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(x, g.y0); ctx.lineTo(x, g.y1); ctx.stroke(); }
+  ctx.restore();
+  ctx.fillStyle = "#ddd"; ctx.font = "11px system-ui"; ctx.strokeStyle = "#888"; ctx.lineWidth = 1;
+  const span = view[1] - view[0], step = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600].find(s => span / s <= 12) || 1200;
+  const dec = step < 0.1 ? 2 : step < 1 ? 1 : 0;
+  for (let t = Math.ceil(view[0] / step - 1e-9) * step; t <= view[1] + 1e-9; t += step) {
+    const x = tx(g, t); ctx.beginPath(); ctx.moveTo(x, g.y1); ctx.lineTo(x, g.y1 + 4); ctx.stroke();
+    const m = Math.floor(t / 60 + 1e-9), s = Math.max(0, t - 60 * m);
+    ctx.fillText(`${m}:${s.toFixed(dec).padStart(dec ? 3 + dec : 2, "0")}`, x - 14, g.H - 6);
+  }
+  const fstep = [0.25, 0.5, 1, 2, 4, 8].find(s => g.fv / s <= 10) || 16;
+  for (let f = 0; f <= g.fv + 1e-9; f += fstep) { const y = fy(g, f); ctx.beginPath(); ctx.moveTo(g.x0 - 4, y); ctx.lineTo(g.x0, y); ctx.stroke(); ctx.fillText(f + "k", 4, y + 4); }
+  drawOverview();
+}
+window.addEventListener("resize", () => setView(view));
+
+// ---------------- overview: the whole file's waveform envelope ----------------
+const ov = $("overview"), octx = ov.getContext("2d");
+let env = null;                 // {ver, w, lo, hi, peak}
+function envelope(w) {
+  if (env && env.ver === doc.ver && env.w === w) return env;
+  const x = mono(), n = x.length, lo = new Float32Array(w), hi = new Float32Array(w);
+  let peak = 1e-9;
+  for (let p = 0; p < w; p++) {
+    const a = Math.floor(p * n / w), b = Math.max(a + 1, Math.floor((p + 1) * n / w));
+    let mn = 0, mx = 0;
+    for (let i = a; i < b && i < n; i++) { const v = x[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+    lo[p] = mn; hi[p] = mx; peak = Math.max(peak, -mn, mx);
+  }
+  return env = {ver: doc.ver, w, lo, hi, peak};
+}
+function ovGeom() {
+  const W = ov.clientWidth, H = ov.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr)) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
+  octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return {W, H, x0: PADL, x1: W - 6, y0: 3, y1: H - 3, d: dur()};
+}
+const otx = (o, t) => o.x0 + (o.d ? t / o.d : 0) * (o.x1 - o.x0);
+const oxt = (o, x) => Math.max(0, Math.min(o.d, (x - o.x0) / (o.x1 - o.x0) * o.d));
+function drawOverview() {
+  const o = ovGeom(), c = octx;
+  c.fillStyle = "#111"; c.fillRect(0, 0, o.W, o.H);
+  if (!doc || !N()) return;
+  const w = Math.max(1, Math.round(o.x1 - o.x0)), e = envelope(w), mid = (o.y0 + o.y1) / 2, half = (o.y1 - o.y0) / 2;
+  c.strokeStyle = "#7aa0d8"; c.lineWidth = 1; c.beginPath();
+  for (let p = 0; p < w; p++) { const x = o.x0 + p + .5; c.moveTo(x, mid - e.hi[p] / e.peak * half); c.lineTo(x, mid - e.lo[p] / e.peak * half + .5); }
+  c.stroke();
+  if (sel) { c.fillStyle = "rgba(255,212,0,.35)"; c.fillRect(otx(o, sel.a / doc.sr), o.y0, Math.max(1, otx(o, sel.b / doc.sr) - otx(o, sel.a / doc.sr)), o.y1 - o.y0); }
+  const ph = playheadT(), cx = otx(o, cursor / doc.sr);
+  c.strokeStyle = "#1e90ff"; c.beginPath(); c.moveTo(cx, o.y0); c.lineTo(cx, o.y1); c.stroke();
+  if (ph != null) { const x = otx(o, ph); c.strokeStyle = "#e00"; c.lineWidth = 1.5; c.beginPath(); c.moveTo(x, o.y0); c.lineTo(x, o.y1); c.stroke(); }
+  const v0 = otx(o, view[0]), v1 = Math.max(v0 + 2, otx(o, view[1]));
+  c.fillStyle = "rgba(0,0,0,.4)"; c.fillRect(o.x0, o.y0, v0 - o.x0, o.y1 - o.y0); c.fillRect(v1, o.y0, o.x1 - v1, o.y1 - o.y0);
+  c.strokeStyle = "#fff"; c.lineWidth = 1.5; c.strokeRect(v0, o.y0 + .75, v1 - v0, o.y1 - o.y0 - 1.5);
+  c.fillStyle = "#ddd"; c.font = "10px system-ui"; c.fillText("all", 6, mid + 4);
+}
+let ovDrag = false;
+function ovCentre(x) { const o = ovGeom(), t = oxt(o, x), w = view[1] - view[0]; setView([t - w / 2, t + w / 2], true); }
+ov.addEventListener("pointerdown", e => { if (!doc || e.button !== 0) return; ovDrag = true; ov.setPointerCapture(e.pointerId); ovCentre(e.clientX - ov.getBoundingClientRect().left); });
+ov.addEventListener("pointermove", e => { if (ovDrag) ovCentre(e.clientX - ov.getBoundingClientRect().left); });
+const ovEnd = () => { if (ovDrag) { ovDrag = false; setView(view); } };
+ov.addEventListener("pointerup", ovEnd); ov.addEventListener("pointercancel", ovEnd);
+
+// ---------------- mouse on the spectrogram: select, cursor, pan, zoom, readout ----------------
+let drag = null;
+const canvasXY = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+const toSample = t => Math.max(0, Math.min(N(), Math.round(t * SR())));
+function selEdgeAt(g, x) {
+  if (!sel) return null;
+  const X0 = tx(g, sel.a / doc.sr), X1 = tx(g, sel.b / doc.sr);
+  if (Math.abs(x - X0) <= EDGE && Math.abs(x - X0) <= Math.abs(x - X1)) return "a";
+  return Math.abs(x - X1) <= EDGE ? "b" : null;
+}
+cv.addEventListener("mousedown", e => { if (e.button === 1) e.preventDefault(); });
+cv.addEventListener("pointerdown", e => {
+  if (!doc) return;
+  const g = geom(), [x, y] = canvasXY(e);
+  if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+    e.preventDefault(); drag = {pan: true, x, v0: view.slice()};
+    cv.style.cursor = "grabbing"; cv.setPointerCapture(e.pointerId); return;
+  }
+  if (e.button !== 0 || x < g.x0) return;
+  const edge = selEdgeAt(g, x);
+  drag = edge ? {edge, x, moved: false} : {from: toSample(xt(g, x)), x, moved: false};
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove", e => {
+  if (!doc) return;
+  const g = geom(), [x, y] = canvasXY(e);
+  if (!drag) { cv.style.cursor = x < g.x0 ? "default" : e.shiftKey ? "grab" : selEdgeAt(g, x) ? "ew-resize" : "text"; return readout(g, x, y); }
+  if (drag.pan) {
+    const w = drag.v0[1] - drag.v0[0], dt = (x - drag.x) / (g.x1 - g.x0) * w;
+    setView([drag.v0[0] - dt, drag.v0[1] - dt], true);
+    return readout(g, x, y);
+  }
+  if (Math.abs(x - drag.x) > 3) drag.moved = true;
+  if (drag.moved) {
+    const s = toSample(xt(g, x));
+    if (drag.edge) { const o = drag.edge === "a" ? sel.b : sel.a; sel = {a: Math.min(o, s), b: Math.max(o, s)}; drag.edge = s < o ? "a" : "b"; }
+    else sel = {a: Math.min(drag.from, s), b: Math.max(drag.from, s)};
+    if (sel.b - sel.a < 1) sel = null;
+    selText(); buttons(); draw();
+  }
+  readout(g, x, y);
+});
+function endDrag() {
+  const D = drag; drag = null;
+  if (!D) return;
+  if (D.pan) { cv.style.cursor = "text"; return setView(view); }
+  if (!D.moved && !D.edge) { sel = null; cursor = D.from; stop(); }   // a click: the cursor goes there
+  else if (sel) cursor = sel.a;
+  selText(); buttons(); draw();
+}
+cv.addEventListener("pointerup", e => {                  // then the readout drops the selection / view line
+  endDrag();
+  if (doc) { const [x, y] = canvasXY(e); readout(geom(), x, y); }
+});
+cv.addEventListener("pointercancel", () => { const p = drag && drag.pan; drag = null; if (p) setView(view); else draw(); });
+cv.addEventListener("pointerleave", () => { if (!drag) $("readout").style.display = "none"; });
+cv.addEventListener("wheel", e => {
+  if (!doc) return;
+  const g = geom(), [x, y] = canvasXY(e);
+  if (x < g.x0 || x > g.x1 || y < g.y0 || y > g.y1) return;
+  e.preventDefault();
+  const px = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? g.H : 1, w = view[1] - view[0];
+  const side = e.shiftKey ? (e.deltaX || e.deltaY) : e.deltaX;
+  if (side && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) {
+    const dt = side * px / (g.x1 - g.x0) * w; setView([view[0] + dt, view[1] + dt], true);
+  } else if (e.deltaY) zoomAbout(xt(g, x), Math.exp(Math.max(-1, Math.min(1, e.deltaY * px * 0.002))));
+  readout(g, x, y);
+}, {passive: false});
+function levelAt(t, f) {
+  if (!spec || t < spec.view[0] || t >= spec.view[1] || f < 0 || f > nyq()) return null;
+  const c = Math.min(spec.cols - 1, Math.floor((t - spec.view[0]) / (spec.view[1] - spec.view[0]) * spec.cols));
+  const r = Math.min(spec.nb - 1, Math.max(0, Math.floor((1 - f / nyq()) * spec.nb)));
+  return spec.grey[r * spec.cols + c];
+}
+function readout(g, x, y) {
+  const el = $("readout");
+  if (x < g.x0 || x > g.x1) { el.style.display = "none"; return; }
+  const t = xt(g, x), f = yf(g, y);
+  let s = `t ${tstr(t)}`;
+  if (y >= g.y0 && y <= g.y1) {
+    s += `  f ${f.toFixed(2)} kHz`;
+    const gv = levelAt(t, f);
+    if (gv != null) s += `  ${gv >= 255 ? "≤" : ""}${(-RANGE_DB * gv / 255).toFixed(0)} dB`;
+  }
+  if (drag && drag.pan) s += `\nview ${tstr(view[0])}–${tstr(view[1])}`;
+  else if (drag && drag.moved && sel) s += `\nselection ${((sel.b - sel.a) / doc.sr).toFixed(3)} s`;
+  el.textContent = s; el.style.display = "block";
+  el.title = "dB re the view's loudest (its 99.9th percentile)";
+}
+function selText() {
+  if (!doc) { $("seltxt").textContent = ""; return; }
+  $("seltxt").textContent = sel ? `selection ${tstr(sel.a / doc.sr)}–${tstr(sel.b / doc.sr)} (${((sel.b - sel.a) / doc.sr).toFixed(3)} s)`
+    : `cursor ${tstr(cursor / doc.sr)}` + (clip ? ` · clipboard ${(clip.chans[0].length / clip.sr).toFixed(3)} s` : "");
+}
+function buttons() {
+  const has = !!doc && !!sel;
+  $("cut").disabled = $("copy").disabled = $("del").disabled = $("zoomSel").disabled = !has;
+  $("paste").disabled = !clip; $("undo").disabled = !undoStack.length; $("redo").disabled = !redoStack.length;
+  $("save").disabled = !doc || !N(); $("play").disabled = !doc || !N();
+  $("detect").disabled = !doc || !N() || detecting;
+}
+
+// ---------------- detect calls: the file goes to the review app (scan_audio.py) ----------------
+// unedited: the bytes as opened (the server reads the file at its own rate); edited, recorded, or a
+// format the server cannot read: the audio here as a 32-bit float WAV at its rate
+let detecting = false, maxMb = null;
+function upload(blob, name, onProgress) {
+  return new Promise((ok, bad) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", `/api/upload?name=${encodeURIComponent(name)}`);
+    x.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
+    x.onload = () => {
+      let j;
+      try { j = JSON.parse(x.responseText); } catch { j = {error: x.statusText || "upload failed"}; }
+      if (x.status >= 400 || j.error) bad(new Error(j.error || x.statusText)); else ok(j);
+    };
+    x.onerror = () => bad(new Error("the upload failed (is the review app running?)"));
+    x.send(blob);
+  });
+}
+async function detect() {
+  if (!doc || !N() || detecting) return;
+  const d = doc, st = h => { $("detstat").innerHTML = h; };
+  detecting = true; buttons();
+  try {
+    if (maxMb == null) {
+      const m = await (await fetch("/api/meta")).json();
+      if (!m.can_add) throw new Error("this review app cannot add audio (no embeddings or cell maps cache)");
+      maxMb = m.max_upload_mb;
+    }
+    const orig = !!d.src && !d.changed;
+    let name = orig ? d.name : ($("saveName").value.trim() || "edit.wav");
+    if (!orig && !/\.wav$/i.test(name)) name += ".wav";
+    const asWav = () => encodeWav(d.chans, d.sr, true);
+    let blob = orig ? new Blob([d.src]) : asWav();
+    if (blob.size > maxMb * 2 ** 20) throw new Error(`${(blob.size / 2 ** 20).toFixed(0)} MB is over the ${maxMb} MB limit: add it with scan_audio.py`);
+    let r;
+    try { r = await upload(blob, name, p => st(`uploading ${Math.round(p * 100)}%`)); }
+    catch (e) {
+      if (!orig || !/cannot read/.test(e.message)) throw e;
+      name = name.replace(/\.[^.]*$/, "") + ".wav";
+      blob = asWav();
+      r = await upload(blob, name, p => st(`the server cannot read this format: sending the decoded audio as WAV ${Math.round(p * 100)}%`));
+    }
+    const pre = r.created ? esc(r.rec) : `already added as ${esc(r.rec)}`;
+    for (;;) {
+      const j = (await (await fetch("/api/scans")).json()).find(x => x.rec === r.rec);
+      if (!j) throw new Error(`the server has no scan of ${r.rec}`);
+      if (j.state === "error") throw new Error(`detection failed: ${j.error}`);
+      if (j.state === "done") {
+        const n = Object.values(j.counts || {}).reduce((s, x) => s + x, 0);
+        st(`${pre}: calls detected, ${n} model boxes (all groups) · <a id="openRev" href="/?rec=${encodeURIComponent(r.rec)}" target="_blank" rel="noopener">open in box review ↗</a>`);
+        break;
+      }
+      st(`${pre}: ${j.state === "queued" ? "queued for detection" : `detecting calls ${j.done}/${j.total} windows`}`);
+      await new Promise(res => setTimeout(res, 1000));
+    }
+  } catch (e) { st(`<span class="err">${esc(e.message)}</span>`); }
+  finally { detecting = false; buttons(); }
+}
+$("detect").onclick = detect;
+
+// ---------------- playback ----------------
+let actx = null, srcNode = null, playFrom = 0, playCtx0 = 0, playRate = 1, playTo = 0;
+const playheadT = () => srcNode ? Math.min(playTo, playFrom + (actx.currentTime - playCtx0) * playRate) : null;
+function play() {
+  if (!doc || !N()) return;
+  stop();
+  const a = sel ? sel.a : cursor >= N() - 1 ? 0 : cursor, b = sel ? sel.b : N();
+  if (b - a < 2) return;
+  actx = actx || new AudioContext();
+  const buf = actx.createBuffer(doc.chans.length, b - a, doc.sr);
+  doc.chans.forEach((c, k) => buf.copyToChannel(c.subarray(a, b), k));
+  srcNode = actx.createBufferSource(); srcNode.buffer = buf;
+  playRate = +$("speed").value; srcNode.playbackRate.value = playRate;
+  srcNode.connect(actx.destination);
+  const me = srcNode;
+  srcNode.onended = () => { if (srcNode === me) { srcNode = null; draw(); } };
+  playFrom = a / doc.sr; playTo = b / doc.sr;
+  actx.resume(); playCtx0 = actx.currentTime; srcNode.start();
+  say(`playing ${tstr(playFrom)}–${tstr(playTo)}${playRate !== 1 ? ` at ${$("speed").selectedOptions[0].textContent}` : ""}`);
+  tick();
+}
+function stop() { if (srcNode) { const s = srcNode; srcNode = null; try { s.stop(); } catch {} } draw(); }
+function tick() { draw(); if (srcNode) requestAnimationFrame(tick); }
+$("play").onclick = () => srcNode ? stop() : play();
+$("stop").onclick = stop;
+
+// ---------------- buttons and keys ----------------
+$("cut").onclick = cutSel; $("copy").onclick = copySel; $("paste").onclick = paste; $("del").onclick = delSel;
+$("undo").onclick = undo; $("redo").onclick = redo;
+document.addEventListener("keydown", e => {
+  if (e.target.matches("input, select, textarea")) return;
+  const k = e.key.toLowerCase(), c = e.ctrlKey || e.metaKey;
+  if (c && k === "z" && !e.shiftKey) undo();
+  else if (c && (k === "y" || (k === "z" && e.shiftKey))) redo();
+  else if (c && k === "x") cutSel();
+  else if (c && k === "c") copySel();
+  else if (c && k === "v") paste();
+  else if (c && k === "a") { if (doc && N()) { sel = {a: 0, b: N()}; selText(); buttons(); draw(); } }
+  else if (k === "delete" || k === "backspace") delSel();
+  else if (k === "escape") { sel = null; selText(); buttons(); draw(); }
+  else if (k === " ") { srcNode ? stop() : play(); }
+  else if (k === "r" && !c) { recState ? recStop() : recStart(); }
+  else return;
+  e.preventDefault();
+});
+// for the browser tests: state, read only
+window.__ed = {
+  state: () => ({n: N(), sr: SR(), nch: doc ? doc.chans.length : 0, name: doc && doc.name, edited: !!(doc && doc.edited),
+                 sel: sel && {...sel}, cursor, view: view.slice(), undo: undoStack.length, redo: redoStack.length,
+                 clip: clip ? clip.chans[0].length : 0, spec: spec && {cols: spec.cols, nb: spec.nb, view: spec.view},
+                 recording: !!recState, playing: !!srcNode}),
+  samples: (k, a, b) => doc ? Array.from(doc.chans[k].subarray(a, b)) : [],
+  encodeWav,
+};
+makeLut(); dispNote(); fillFview(); selText(); buttons(); draw();
+</script>
+</body>
+</html>

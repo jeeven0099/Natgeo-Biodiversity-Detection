@@ -24,8 +24,9 @@ analysis iterates cheaply.
 
 *`scripts/review_app.py` on one Aves box. Left: every zero-shot box in the recording; ✓ marks a
 logged box. Centre: the spectrogram, with Raven boxes (blue dashed), the cells Perch used (shaded)
-and the accepted box (yellow). Below it: Perch's top 5 inside the box's group, the species
-chosen, and the Yes / No / Unknown decision with the box's history. The entries shown are an
+and the accepted box (yellow), which the reviewer draws or adjusts by dragging; ▶ plays only that
+box. Below it: Perch's top 5 inside the box's group, each as scientific name · English common
+name, the species chosen, and the Yes / No / Unknown decision with the box's history. The entries shown are an
 illustration, not a review: Perch's top 5 here are Neotropical species, which is the reason a
 reviewer can add any species by hand. See [Review platform](#review-platform-yes--no--unknown-with-a-top-5-species-list).*
 
@@ -38,6 +39,14 @@ reviewer can add any species by hand. See [Review platform](#review-platform-yes
 - [Hybrid on the long-form recordings](#hybrid-on-the-long-form-recordings-earthchirp-for-insects-perch-for-the-rest)
 - [Tightened boxes](#tightened-boxes-where-in-time-and-frequency-each-zero-shot-box-is)
 - [Review platform](#review-platform-yes--no--unknown-with-a-top-5-species-list)
+- [Audio editor](#audio-editor-open-record-cut-and-save-audio)
+- [New audio: detect calls on a file you add](#new-audio-detect-calls-on-a-file-you-add)
+- [Review labels](#review-labels-the-logs-as-box-taxon-and-species-labels)
+- [Raven labels as reviews](#raven-labels-as-reviews)
+- [Learner 1: thresholds and box settings](#learner-1-thresholds-and-box-settings-from-the-reviews)
+- [Box refiner](#box-refiner-edges-on-the-fine-spectrogram-fitted-to-the-reviewers-boxes)
+- [Learners 2 and 3: taxon head and learned species names](#learners-2-and-3-taxon-head-and-learned-species-names)
+- [Common names for the top 5](#common-names-for-the-top-5)
 - [Why the class index exists](#why-the-class-index-exists)
 - [GPU setup (Windows)](#gpu-setup-windows)
 - [Known caveats](#known-caveats)
@@ -542,41 +551,229 @@ What the smoke recordings show (κ 0.5, listening thresholds; descriptive only, 
 ## Review platform: yes / no / unknown with a top-5 species list
 
 `scripts/review_app.py` + `scripts/review_app.html`. A local web page for reviewing every zero-shot box,
-one at a time. Each accepted review becomes one row in a CSV. No active learning yet: the log is the
-only output, and nothing in it is fed back to a model.
+one at a time, and for boxing the calls the model missed. Each accepted review becomes one row in a
+CSV. The logs are the app's only output. `review_calibrate.py`, `box_refine.py`, `review_taxon.py` and
+`review_species.py` fit to them when run. Three of them can change what the app shows, and only once
+adopted: the box refiner's settings, the taxon head and the learned species names (read at start, see
+[Box refiner](#box-refiner-edges-on-the-fine-spectrogram-fitted-to-the-reviewers-boxes) and
+[Learners 2 and 3](#learners-2-and-3-taxon-head-and-learned-species-names)). No learning happens
+inside the app.
 
 ```
 .venv-perch\Scripts\python.exe -X utf8 scripts\review_app.py
 ```
 
 - Opens http://127.0.0.1:8765.
-- Options: `--device cpu` (Perch on CPU), `--port N`, `--no-browser`, `--review-dir DIR`.
-- Writes `data\review\annotation_log.csv` (the log) and `data\review\prediction_cache.jsonl` (top-5 cache).
+- Options: `--device cpu` (Perch on CPU), `--port N`, `--no-browser`, `--review-dir DIR`,
+  `--no-refiner` (tightened boxes only, no "box uncertain" source), `--no-learners` (zero-shot only:
+  no taxon head, no learned names), `--uploads-dir DIR` (where added audio goes, default
+  `data\uploads`; see [New audio](#new-audio-detect-calls-on-a-file-you-add)).
+- `--export-raven DIR [--export-keep yes|all]` writes one Raven selection table per reviewed recording
+  into `DIR` and exits without starting the server (see **Export Raven table** below). It refuses
+  `dataset\annotaions`, where the Raven tables the app reads as labels live.
+- Writes `data\review\annotation_log.csv` (the box log), `data\review\box_shown.csv` (which box each
+  review started from), `data\review\species_shown.csv` (which learned names each species answer
+  saw), `data\review\audit_windows.csv` (closed audit windows) and
+  `data\review\prediction_cache.jsonl` (top-5 cache). Audio added with "add audio…" or the editor's
+  "detect calls" goes to `data\uploads` (git-ignored) with its scan.
+- Reads, at start and only if they exist, `data\review\calibration\refiner.json` (`box_refine.py`),
+  `taxon.json` + `taxon.npz` (`review_taxon.py`) and `species.json` + `species_protos.npy`
+  (`review_species.py`). A file that is missing, or whose learner was kept, changes nothing. Restart
+  the app after a refit.
 - Needs only `.venv-perch`: stdlib `http.server`, numpy, scipy and PIL. There is no Flask and no CDN.
 
 ![Review app: an EarthChirp insect box with kept cells and EarthChirp's top 5](docs/figures/review_app_ec_cells.png)
 
 *An EC-Insecta box (135–165 s). EarthChirp scores it. The tightened box keeps 6.97–16 kHz, and the
-shaded columns are the cells kept at κ 0.5. "cell mask" playback plays only those cells (16 runs
-here, capped at 30 s). The top 5 are EarthChirp prototypes with their level (species / genus).*
+shaded columns are the cells kept at κ 0.5. "kept cells inside the box" plays only those cells,
+within the yellow box's time and band. The top 5 are EarthChirp prototypes with their level
+(species / genus).*
 
 **What a box is.** The viewer's boxes: `perch_viewer.perch_boxes` at the listening thresholds
 (Aves 0.94, Amphibia 0.128, EC-Insecta 0.42, Anthropogenic 0.043, …). Each box is tightened with the cell
-maps at the chosen κ (`CellMaps.tighten_boxes`). A box id is `recording|lane|begin|end`, so it does not
-depend on κ.
+maps at the chosen κ (`CellMaps.tighten_boxes`). A box id is `recording|model|lane|begin|end`, so it
+does not depend on κ.
+
+**The queue: seven sources.** The model boxes only show what the model found. To find what it missed,
+the list can also hold four other kinds of item, one kind for boxes whose edges need a person, and
+one for time the taxon head flags, ticked under **Show** in the header (model boxes and your boxes by
+default; the choice is remembered). "box uncertain" is listed only with the refiner, "taxon check"
+only when a taxon head is adopted:
+
+| Source | What it is | `model` in the log | Over all 134 recordings |
+|---|---|---|---|
+| model boxes | the boxes above | `Perch` / `EarthChirp` | 16,301 |
+| below threshold | runs of a lane at a lower cut (`near_low`) holding no segment at the listening threshold | `Perch below threshold` / `EarthChirp below threshold` | 4,662 |
+| Raven, not matched | Raven boxes `raven_match.py` matches to no model box of their group (time IoU ≥ 0.3, 1:1), and `Unknown` ones | `Raven` | 4,069 |
+| your boxes | boxes you drew with **New box** (below) | `reviewer` | grows as you log |
+| audit windows | 4 random 15 s windows per recording, to box every call in | (own file) | 536 |
+| box uncertain | model and below-threshold boxes the box refiner cannot settle | as the box's own source | per recording, when opened |
+| taxon check | runs the adopted taxon head calls present where no model box of the group is | `taxon head` | none until a head is adopted |
+
+- **Below threshold.** Per lane, `near_low` is the score above which the next 5% of all 2.5 s segments
+  lie, counted down from the listening threshold. It is set by rank, not by any label. A near item is
+  a run at `near_low` whose peak stays under the threshold, so it never overlaps a model box of its
+  lane.
+
+  | Lane | `near_low` | threshold |
+  |---|---|---|
+  | Aves | 0.9309 | 0.94 |
+  | Amphibia | 0.0692 | 0.128 |
+  | Insecta (Perch) | 0.0282 | |
+  | Mammalia | 0.0122 | |
+  | Anthropogenic | 0.0224 | 0.043 |
+  | Weather | 0.0044 | |
+  | EC-Insecta | 0.3982 | 0.42 |
+  | EC-margin | 0.2574 | |
+
+- **Raven, not matched.** Every Raven box that `raven_match.py` does not match to a model box of its
+  group's lanes (the default hybrid lanes, else every lane of the group): no model box overlaps it
+  (1,443, plus the 11 `Unknown` of those), its model boxes went to other Raven boxes (1,767), or the
+  merged span of its model boxes has time IoU below 0.3 (812). All 47 `Unknown` boxes are listed too
+  and come with no group: you pick one. After `raven_autolabel.py --write`, each listed box except
+  the `Unknown` ones already has a `raven-auto` `yes` row (✓); the matched ones are logged on their
+  model boxes instead. Raven is incomplete and its boxes stitch whole bouts
+  ([Raven boxes are a structure reference](#known-caveats)), so a box here is a place to listen, not
+  a missed call by definition.
+- **Your boxes.** Every box you drew and logged, rebuilt from the log on each load. It keeps the
+  box as first drawn; its group is the last one logged.
+- **Box uncertain.** A model or below-threshold box whose refined box is missing or whose refiner
+  confidence is under its group's fitted cut (0.5 before any fit). The app refines a recording's
+  boxes in the background when it is opened: 316 boxes of the busiest recording took 20.8 s
+  (66 ms per box), and 157 of them (50%) were uncertain at the default setting. Ticked alone, the
+  list is sorted least confident first. These are the boxes where an edited edge teaches the
+  refiner most.
+- **Taxon check.** Only for a group whose taxon head `review_taxon.py` adopted. A find is a run of
+  2.5 s segments on the group's default lane where the head's probability is ≥ its cut, minus the
+  time any model box of the group covers; it is tightened like a model box. Model boxes of an adopted
+  group also carry the head's probability, and a **taxon doubt** tag when it is under the cut.
+  Ticked alone, the list holds the finds (highest probability first), then the doubted model boxes
+  (lowest first): the head's disagreements with the zero-shot threshold, which are what a review
+  settles. Runs merge like model-box runs, so a find can be long.
+- **Audit windows.** Picked by `numpy.random.default_rng([20261116, crc32(recording)])` from the
+  recording's non-overlapping 15 s slots, so they are the same on every start, and they are chosen
+  without looking at any score or label.
+
+Raven and your boxes have no fixed group: the group you pick is logged in `lane`, and their id
+(`recording|model|begin|end|low|high`) leaves the group out, so a changed group stays the same item.
 
 **The page**
-- **Spectrogram:** the model box ± 2 s (10–120 s view), with:
+- **Minute view** (the "minute view" box in the header; on by default, remembered). Choosing a
+  recording shows its first minute, and the list holds only the ticked items that fall in it.
+  The view is made for finding missed calls: every listed box of the minute is on one spectrogram.
+  - **Moving:** "◀ minute" / "minute ▶" above the spectrogram, or `[` / `]` (also PageUp / PageDown).
+    The last minute ends at the recording's end. The list header reads "minute 3 of 20 · 2:00–3:00",
+    then how many items are listed and how many are not reviewed yet.
+  - **What is listed:** an item belongs to every minute its span overlaps, so a long box (a bout,
+    a whole-recording Raven box) appears in each of them. A logged item's span includes its accepted
+    box. Model boxes, below-threshold runs, unmatched Raven boxes, your boxes and the rest follow the
+    **Show** and group ticks as before. Tick "Raven, not matched" to see the Raven boxes the model
+    did not catch.
+  - **What is drawn:** each listed box is drawn in its group's colour and labelled `#n`, with ✓ once
+    logged. A logged box is drawn solid, a box not yet logged dashed, and a box answered "no" grey.
+    The open box is drawn as before (yellow), and Raven's own boxes stay as the blue overlay.
+  - **Opening a minute** opens its first unreviewed item, else its first. ← / → and J stay inside
+    the minute. When J finds nothing left, the page says to look for missed calls and then press `]`.
+  - **Click and drag:** a click on a drawn box opens it (the smallest under the pointer, so one call
+    inside a bout box can be picked). A drag that starts outside the open box starts a new box there,
+    so a missed call is boxed in one move. Pick its group and Accept as usual, and the page comes back
+    to the same minute. A drag that starts inside the open box redraws it, and its edges and corners
+    move as before.
+  - **An empty minute** (nothing ticked falls in it) still shows its spectrogram, and a drag there
+    starts a new box.
+  - **Zoom:** the view stays on the whole minute while you step through its boxes. A view you zoomed
+    into is kept while it holds the box; "whole minute" goes back.
+  - **Minute view off:** the old queue. The whole recording is listed and each box opens on its own
+    view.
+  - **Ticks and κ** reload the recording but keep the minute while the open box lies in it. If you
+    tick several boxes quickly, only the last load counts, and only the last box you picked opens.
+- **Spectrogram:** with the minute view off, the model box ± 2 s (10–120 s view), with:
   - Raven boxes (blue dashed, labelled);
   - kept cells (shaded);
   - the model box (dashed);
   - the tightened box (thin line);
+  - the refined box (dotted), only for a group the refiner has adopted and a box it is confident on;
   - the accepted box (black and yellow).
-  Dragging redraws the accepted box. The four number fields edit it exactly.
-- **Playback:**
-  - three modes: original, band-passed (the accepted box's rows) and cell mask (kept cells only);
-  - 0–2 s pad;
-  - ▶ on a top-5 row plays the 5 s window where that name scored highest.
+- **Zoom and scroll** (over the plot; over the axes and outside the canvas the page scrolls as usual):
+  - **wheel:** zooms in time about the mouse: the time under the pointer stays put. Each 100 px of
+    wheel scales the view by e^0.2, from 0.5 s to 120 s (and never past the recording);
+  - **Shift+wheel**, or a sideways wheel / trackpad swipe: pans, by the wheel's pixels;
+  - **Shift+drag** or **middle-button drag:** pans; the view follows the mouse (cursor "grabbing")
+    and the box is not touched;
+  - the image is asked for only once the view has rested 150 ms, so a fast wheel or drag loads one
+    image, not one per step. Until then the old image is stretched to the new view.
+- **Readout** (top right of the spectrogram, under the mouse): `t 2:13.250  f 4.31 kHz  −37 dB`.
+  - The level is the view image's own grey value: dB below the view's loudest (its 99.9th percentile),
+    to 120 dB below, shown as `≤-120 dB`. It is read from the image you see, so it changes with the
+    window and the view, not with brightness / contrast.
+  - Over the time axis it gives only the time; over the frequency axis and off the canvas it hides.
+  - While drawing a box it adds a line with the box (`box 0:12.100–0:13.400 (1.300 s) · 3.10–5.20
+    kHz`); while panning, a line with the view. The extra line goes when the mouse is released.
+- **Overview strip** (under the spectrogram, labelled "all"): the whole recording at once.
+  - Drawn: the minute grid with minute labels, the open minute shaded (minute view), every listed item
+    of every minute (filled = yes, dashed = not logged, grey = no; audit windows as a band along the
+    bottom), the open box in yellow, Raven boxes in blue when "Raven" is ticked, the play cursor and
+    playhead, and the view as a white frame with the rest dimmed.
+  - A click or drag centres the view there, keeping its width. In the minute view the view stays
+    inside the open minute, and a click in another minute opens that minute.
+- **Export Raven table** (header button; "yes only" by default, or "every answer"): downloads
+  `<recording>.Table.1.selections.txt` for the recording on screen, built from the log at that moment.
+  - One selection per reviewed box: its newest row, as its accepted box, kept when its answer is yes
+    (or any answer with "every answer"), in begin-time order. Unknown answers are left out of "yes
+    only" like everything not yes.
+  - Tab-separated, CRLF line ends, UTF-8. The first nine columns are those of the tables in
+    `dataset\annotaions` (`Selection`, `View` = Spectrogram 1, `Channel` = 1, begin / end s, low /
+    high Hz, delta time / delta freq). Then `Annotation` = the species named (`; `-joined), else the
+    group, and `Group`, `Decision`, `Source` (the log's `model`), `Reviewer` (`raven-auto` for rows
+    logged from Raven itself), `Logged At`, `Log ID`.
+  - Raven opens it on the recording's WAV like its own table. Nothing is written on the server; the
+    CLI form above writes every recording at once.
+- **Audio editor ↗** (header link): opens the [audio editor](#audio-editor-open-record-cut-and-save-audio)
+  in a new tab.
+- **Add audio…** (header button, beside the recording list): uploads an audio file of your own, runs
+  the zero-shot model on it and lists it with the dataset's recordings as `<name> · added (<file>)`.
+  The status beside the button counts the upload, then the windows scanned. When the scan is done the
+  recording opens by itself, unless you have moved to another box meanwhile ("open it" then). See
+  [New audio](#new-audio-detect-calls-on-a-file-you-add).
+- **Display** (the bar under the spectrogram; remembered per browser, "reset" restores the
+  defaults). None of it changes a box, a score or the log.
+  - **brightness** and **contrast** set the colour scale. The server sends the view as grey 8-bit dB,
+    from the view's loudest (its 99.9th percentile) down to 120 dB below it. The page then colours the
+    part you choose. At 50 / 50 the scale is 0 to −80 dB, the picture the app showed before.
+    Brightness moves the scale up to 30 dB either way; contrast narrows it from 120 to 30 dB. The note
+    beside the bar gives the scale in dB and the window in ms and Hz.
+  - **colours:** grey (loud = black), grey dark (loud = white), viridis, magma.
+  - **window:** the STFT size, 256 to 4096 points (5.3 to 85 ms at 48 kHz; 1024 by default). A
+    short window sharpens time (clicks, pulse trains), a long one sharpens frequency (whistles, tonal
+    insects). The hop grows with the view but never past the window, so no audio falls between frames.
+    When a view has more frames than the 3000 columns, each column is the loudest of its frames, so a
+    short click is not averaged away. At 1024 points the picture is the old one for views up to about
+    64 s.
+- **Play view** (▶ play view, or P): plays the view from the play cursor to the view's end, all
+  frequencies, at most 60 s at a time.
+  - A click on the time axis (under the spectrogram) sets the play cursor, drawn as a dashed blue line
+    with a handle on the axis. With no cursor in the view, playing starts at the view's start.
+  - The red playhead moves as it plays. A click on the axis while it plays goes on from there.
+  - Stopping part-way (P, ■ or the button) leaves the cursor where it stopped, so P goes on from
+    there. After a 60 s clip of a longer view, the cursor moves to its end, so P plays the rest.
+  - Moving the view away from the playhead (the next minute, a new recording) stops it.
+- **Speed:** 2×, 1×, ½×, ¼×, ⅛× for both play view and play box (remembered). The pitch moves with
+  the speed, as on tape: at ⅛× a 16 kHz call sounds at 2 kHz, and an ultrasound-ish insect becomes
+  audible. Changing it while playing takes effect at once.
+- **Drawing the box:** the box is set on the spectrogram; nothing is typed.
+  - Drag anywhere (also inside the current box) to draw a new box.
+  - Drag an edge or a corner of the yellow box to move just that side; the cursor changes within 7 px
+    of it. A click without a drag changes nothing, and boxes under 0.05 s or 0.05 kHz are ignored.
+  - The box reads as text below (begin–end s · low–high kHz, and its size). "tightened box" and
+    "model box" reset it. "top 5 for this box" reruns the model on the drawn span.
+- **Playback plays the box and nothing else:** exactly its begin–end, no padding, capped at 30 s.
+  - **the box only** (default): only its low–high kHz band;
+  - **the box's time, all frequencies**;
+  - **kept cells inside the box**: the kept cells, cut to the box's band (no cell map: the band);
+  - "play when drawn" (on by default) plays a box as soon as it is drawn or adjusted;
+  - the audio is filtered with 0.25 s extra each side, then cut to the box, with 10 ms fades, so the
+    edges do not click. If nothing passes the filter (no kept cell in the band), it plays silence;
+  - ▶ on a top-5 row plays the 5 s window where that name scored highest, at all frequencies.
 - **Model's top 5**, computed on demand for the accepted span and cached:
   - **Perch lanes:** Perch's softmax over 14,795 classes, max over the windows covering the span, then
     the top 5 *within the lane's group* (an Aves box shows birds). Perch's top 5 over all classes is
@@ -585,23 +782,65 @@ depend on κ.
     (species / genus / group).
   - **Window choice:** windows overlapping the span by ≥ min(2.5 s, span); else the best overlap; at most
     64, evenly spaced.
+  - **Common names:** each row reads *scientific name* · English common name, e.g. *Glaucidium
+    brasilianum* · Ferruginous Pygmy-Owl. Names come from `config/common_names.csv` (see
+    [Common names](#common-names-for-the-top-5)). A name with none (sound-event classes, EarthChirp
+    genus prototypes, species with no English name) shows the scientific name only. The names are
+    added when the top 5 is served, so cached predictions get them too. The log still stores
+    scientific names only.
 - **Species:**
   - tick any of the top 5, or add any name with autocomplete;
   - the vocabulary (17,553 names) is Perch labels, EarthChirp names, Raven labels, `taxonomy.csv`,
     `perch_targets.csv` queries, and names added earlier;
   - Enter on free text adds it as typed.
+  - Search covers common names too: "sunda scops" finds *Otus lempiji*, "tree cricket" finds
+    *Oecanthus* species. Chosen species show their common name in the chips.
+  - **Learned names** (only with an adopted species learner): up to 3 names whose prototype, built
+    from earlier reviewed boxes, has cosine ≥ τ to this box's embedding, listed above the zero-shot
+    top 5 and marked "learned". A ticked one is logged with source `learned`. A fixed 10% of boxes
+    (by crc32 of the box id) never show them, as a control.
 
   ![Adding a species that is not in the top 5](docs/figures/review_app_add_species.png)
 
-  *Typing "boobook" lists the matches with their sources (Perch class, Raven label, target list).
-  The last line adds the text as typed.*
+  *Typing "boobook" lists the matches as scientific name · common name, with their source (Perch
+  class, Raven label, target list) and eBird code. The common name is what matched here, e.g.
+  Ninox ios · Cinnabar Boobook.*
 
 - **Decision:** Yes / No / Unknown. Optional comment. "Accept and log" (Ctrl+Enter), then on to the
   next unreviewed box.
+- **Which box it opens on:** a box already logged opens on its last accepted box. Otherwise a model or
+  below-threshold box opens on its refined box when the refiner is adopted for its group and
+  confident (a "refined box" reset appears), except a fixed 10% of those, shown plain as a control;
+  else on the tightened box. The info line shows the refiner confidence.
 - **Revisiting a box:** a box already logged opens with its last accepted row filled in, and shows its
   history.
-- **Keys:** Y / N / U, 1–5 (tick a top-5 row), Space (play / stop), ← / → (box), J (next unreviewed),
-  Ctrl+Enter. Keys are ignored while typing.
+- **Group picker:** Raven and your boxes show a "group" menu above the decision. It sets the lane
+  logged, which model gives the top 5 (Perch, or EarthChirp for the EC lanes), and the threshold and
+  peak score written to the log. A Raven box of `Unknown` group cannot be accepted until one is
+  picked.
+- **New box** (button, or B): a box the list does not have, for a call the model missed.
+  - Drag around the call on the current spectrogram, pick its group (remembered for the next new
+    box), then name species and Accept as usual. The decision starts at yes.
+  - The model's top 5 runs once there is a box and a group.
+  - After logging, the page returns to the item you started from, and the box joins the list as
+    "your box" (drawn green dotted, labelled "yours: group", on every spectrogram it falls in).
+  - Esc or "cancel" drops it.
+- **Audit windows:** the page switches to an audit card.
+  - The window is the unshaded 15 s; ▶ plays all of it. The model's boxes and cells are hidden so
+    they do not steer you (the Raven toggle still works).
+  - Drag around each call you hear, of any group: this starts a new box there. Log it, and you come
+    back to the window, which lists your boxes in it.
+  - **Complete**: every call of the ticked groups has a box. Untick a group you did not mark.
+    **Skip**: too noisy or busy to mark it all.
+  - Windows are logged to `audit_windows.csv`. They are the only place where the model's recall can
+    be measured fairly: they were picked at random, and inside a complete window an unboxed stretch
+    of a ticked group means no call of it. Nowhere else does a missing box mean absence (Raven and
+    the log are both incomplete). Recall is not computed in the app yet.
+- **Keys:** Y / N / U, 1–5 (tick a top-5 row), Space (play / stop the box), P (play / stop the
+  view), ← / → (box), J (next unreviewed),
+  `[` / `]` or PageUp / PageDown (previous / next minute, minute view), B (new box), Esc (cancel the
+  new box), Ctrl+Enter. Keys are ignored while typing; Y / N / U, 1–5 and Ctrl+Enter do nothing in
+  an audit window.
 
 **Log semantics** (`annotation_log.csv`)
 
@@ -611,13 +850,31 @@ Append-only. Every Accept writes a new row and nothing is ever rewritten.
   - `unknown` is **withheld**, not negative.
   - `no` says nothing about other groups.
 - **`species`** may be of any group: a bird inside an EC-Insecta box is allowed. It is `; `-joined, with
-  a matching `species_source` per name: `top1`–`top5` (ticked from the list) or `added`.
+  a matching `species_source` per name: `top1`–`top5` (ticked from the list), `learned` (a learned name) or `added`.
 - **Box columns:**
   - `box_*`: the model box;
   - `tight_*`: the tightened box at the logged `kappa`;
   - `accepted_*`: what the reviewer confirmed;
   - `box_edited` = 1 when `accepted_*` differs from `tight_*`.
 - **`top5`** = `name=score | …` as shown. `prediction_span` = the span that top 5 was computed on.
+- **`model`** says which source the box came from (table above). The columns stay the same for every
+  source:
+  - **`Perch` / `EarthChirp`, and `… below threshold`:** as above. `box_max_score` is the run's peak,
+    under `threshold` for the below-threshold source.
+  - **`Raven`:** `box_*` and `tight_*` are the Raven box, `kappa` is blank. `lane` is the group
+    picked; `threshold` and `box_max_score` are that lane's threshold and its peak 2.5 s segment
+    score over the box (blank when none).
+  - **`taxon head`:** a taxon-check find. `box_*` is the run and `tight_*` its tightened box, as
+    for model boxes. `threshold` and `box_max_score` are the lane's zero-shot threshold and its peak
+    over the run (under the threshold, since threshold time is model-box time). The head's own
+    probability is shown on the page, not logged.
+  - **`reviewer`:** the first row of a drawn box has `box_*` = `tight_*` = `accepted_*` = the box as
+    drawn, `box_edited` 0 and `kappa` blank. Later rows keep `box_*` / `tight_*` as first drawn, so
+    `box_edited` marks a later change. `threshold` and `box_max_score` are as for Raven: the peak
+    says how close the model came.
+- `app_version` is 4 from the taxon and species learners on, 3 from the box refiner on, 2 from the
+  queue sources on (1 before; all read the same). `LOG_COLS` did not change: what the refiner and
+  the learners add goes to `box_shown.csv` and `species_shown.csv`.
 
 | Column | Meaning |
 |---|---|
@@ -635,6 +892,47 @@ One logged row (the screenshot above; illustration only):
 log_id,logged_at,reviewer,recording,lane,model,threshold,box_begin_s,box_end_s,box_max_score,kappa,tight_begin_s,tight_end_s,tight_lo_khz,tight_hi_khz,accepted_begin_s,accepted_end_s,accepted_lo_khz,accepted_hi_khz,box_edited,decision,species,species_source,top5,prediction_span,comment,app_version
 ddf7ec42a062,2026-11-16T10:48:40,demo,S01634_20250228_012000,Aves,Perch,0.94,127.5,140.0,0.964742,0.5,127.5,136.875,0.955,2.864,127.5,136.875,0.955,2.864,0,yes,Glaucidium brasilianum; Ninox boobook,top1; added,Glaucidium brasilianum=0.3746 | Piprites chloris=0.0912 | Cuculus solitarius=0.0653 | Bucco tamatia=0.0255 | Monasa nigrifrons=0.0212,127.50-136.88,"illustration only, not a real review",1
 ```
+
+**Shown-box log** (`box_shown.csv`). Append-only, one row per log row, joined on `log_id`. It records
+the box the reviewer started from, so a learner can tell an unedited refined box (which agrees with
+what was shown and proves nothing) from an unedited plain one.
+
+| Column | Meaning |
+|---|---|
+| `log_id`, `logged_at`, `box_id`, `app_version` | the log row it belongs to, and the box |
+| `shown_box` | `refined`, `tight`, `tight (control)` (confident, shown plain on purpose), `previous` (the box's last accepted box), `raven`, `drawn`; rows from `raven_autolabel.py`: `raven-auto` (one model box fitted to a Raven box), `raven-auto merge` (several merged into one), `raven` (a new box) |
+| `shown_begin_s`, `shown_end_s`, `shown_lo_khz`, `shown_hi_khz` | the box shown |
+| `refined_begin_s`, `refined_end_s`, `refined_lo_khz`, `refined_hi_khz`, `refine_conf` | the refiner's box and confidence, shown or not (blank for Raven, drawn boxes and `--no-refiner`) |
+| `refiner_version` | `refiner.json`'s version (`default` before a fit) |
+
+Rows logged before the side file existed read as `tight` (pipeline boxes), `raven` or `drawn`.
+
+**Shown-names log** (`species_shown.csv`). Append-only, one row per log row, joined on `log_id`. A
+species picked from a learned row agrees with the learner by construction, so the species learner
+is scored only on rows that showed no learned name.
+
+| Column | Meaning |
+|---|---|
+| `log_id`, `logged_at`, `box_id`, `app_version` | the log row it belongs to, and the box |
+| `learned_shown` | `; `-joined learned names shown (blank: none shown, a control box, or no learner) |
+| `control` | 1 when the box is in the 10% control share |
+| `species_version` | `species.json`'s version (`default` with no adopted learner) |
+
+Rows logged before the side file existed read as having shown no learned name.
+
+**Audit log** (`audit_windows.csv`). Append-only, newest row of a window wins.
+
+| Column | Meaning |
+|---|---|
+| `audit_id`, `logged_at`, `reviewer`, `app_version` | row id, local time, name typed in the header, app version |
+| `recording`, `window_begin_s`, `window_end_s` | the window |
+| `status` | `complete` (every call of `groups` has a box) or `skipped` |
+| `groups` | `; `-joined groups that are complete (Aves, Amphibia, Insecta, Mammalia, Anthropogenic, Weather); blank when skipped |
+| `n_reviewer_boxes` | your boxes logged yes that overlap the window, when it was closed |
+| `comment` | free text |
+
+The boxes themselves are in `annotation_log.csv` (`model` = `reviewer`); a window row only says
+which groups inside it are fully boxed.
 
 The screenshots were taken in headless Chrome over CDP. The server ran on a separate port with a
 throwaway `--review-dir`, which was deleted afterwards.
@@ -663,10 +961,48 @@ folder; GPU):
 | EC top-1 vs max `ec_cos` over the box's windows | equal (0.5315, 0.5782, 0.5494) |
 | Species search | finds *Otus lempiji*, Brown Boobook (a Raven label), *conocephalus* |
 | Spectrogram PNG | 3000 × 513, 1.24 MB, complete over HTTP |
-| Audio power share in 0.955–2.864 kHz (Aves box) | original 0.018, band-passed 0.993, cell mask 0.994; length 10.38 s as requested |
+| Audio of the tightened Aves box (127.5–136.875 s, 0.955–2.864 kHz), pad 0, 3 modes | each exactly 9.3750 s, first and last sample 0 (fades). Power share in the band: all frequencies 0.018, box only 0.994, kept cells 0.999 |
+| Audio of a box drawn inside it (half its time, the middle half of its band) | each exactly 4.6870 s. Power share in 1.432–2.387 kHz: all frequencies 0.013, box only 0.996, kept cells 0.996 |
+| Audio defaults (no `mode`, no `pad`) | byte-identical to box only, pad 0 |
+| Audio edges and limits | box at 0 s and at the file's end: 1.5000 s each; a 45 s box is capped at 30.0000 s; pad 0.5 still gives 6.0000 s for a 5 s span |
+| Kept cells with no kept cell in the band (17–20 kHz) | silence (peak 0), not filter residue normalised to full scale |
 | Errors | unknown path 404; bad box id 500 JSON; bad decision / inverted box 400, nothing logged |
+| Items of every source, all 134 recordings | 12.4 s; model 16,301, below threshold 4,662, Raven 4,069 (47 with no group), audit 536; 25,568 ids, all unique (rerun 2026-11-17: 22.5 s); no reviewer items before anything is logged; `n` = 1..N in begin order |
+| Below-threshold items | every peak in [`near_low`, threshold) of its lane; `model` = "… below threshold"; none overlaps a model box of its lane |
+| Raven items (not matched) | every Raven box no model box of its group overlaps is listed (1,454, an independent count from `raven_lanes`); count = distinct Raven boxes less the 1,186 `raven_match` matches = 4,069; box = the Raven box; lane editable (was: only the 1,454 with no overlap, before `raven_match.py`) |
+| Audit windows | 15 s on the 15 s grid, non-overlapping, inside the file; exactly min(4, slots) per recording; identical on repeat calls, different between recordings; full band, no lane |
+| `LOG_COLS` | identical to the last commit (27 columns, parsed from `git show HEAD`) |
+| `/api/meta` | sources (box uncertain only with a refiner, taxon check only with an adopted head), default sources (model, reviewer), audit groups, `near_low`, complete-window count, learners (species version, adopted taxon groups) |
+| `/api/meta` for the minute view (2026-11-17) | `minute_s` = 60; every one of the 134 recordings carries `duration_s` and `fmax_khz`, equal to its wav header (`soundfile.info`), with no mismatch |
+| `/api/predict` with `id=new` (a box being drawn) | Aves → Perch top 5; EC-Insecta → EarthChirp; 400 for no group, unknown group, unknown recording, t0 ≥ t1; a `lane=` on a model box → 400; on a reviewer box → that lane's model |
+| `/api/audio.wav` with `id=new` | 2.2500 s for a 2.25 s drawn box; works before a group is picked |
+| Log a new box | no group / unknown group / unknown recording → 400; with Aves: `model` reviewer, `kappa` blank, box = tight = accepted, not edited, Aves threshold and peak (0.8915); it becomes the only reviewer item, with the returned id; `/api/boxes` shows decision, species and accepted box |
+| Re-log the reviewer box with another group and a moved edge | same id; lane Amphibia, `box_edited` 1, Amphibia's threshold; item keeps the box as first drawn, group as last logged |
+| Lane in the body on a model box | ignored; row keeps the box's lane and id |
+| Raven-miss of `Unknown` group | Accept without a group → 400; with Aves → `model` Raven, same id, not edited; again with Amphibia → same id; `/api/boxes` shows Amphibia. Same for an Orthoptera box (EC-Insecta) |
+| Log a below-threshold box | `model` "Perch below threshold", the lane's threshold, peak 0.0128 logged, same id |
+| Audit windows over HTTP | `/api/log` on a window → 400; complete with no group, bad status, or a model box id → 400. Complete with Aves, Insecta, Fish → groups "Aves; Insecta", 1 reviewer box counted; `audit_windows.csv` header = `AUDIT_COLS`; meta counts 1 complete. Then skipped → groups blank, `/api/boxes` shows skipped, history of 2, meta 0 complete |
+| Old log rows | every row has `LOG_COLS`; the 2 rows of the real `data/review/annotation_log.csv` (app version 1) still resolve to their boxes |
+| `/api/meta` for the display (2026-11-17) | `spec_windows` [256, 512, 1024, 2048, 4096], `spec_range_db` 120, `view_play_s` 60 |
+| `/api/spec.png` with no `n` | byte-identical to `n=1024` |
+| `/api/spec.png` at each window, on a 16.5 s box view and a 120 s view | height n/2 + 1 (129 … 2049), width ≤ 3000 (1547–2999); 0.11–0.13% of cells at grey 0, so 0 is the view's 99.9th percentile; at most 0.4% at grey 255 (120 dB below) |
+| 120 s at 256 points | hop = window (256), so 22,500 frames, max-pooled 8 to a column: 2813 columns |
+| Pooling keeps a click: one impulse at 60 s in noise at 1e-3, 120 s view, 256 points | the darkest column is at 59.98 s, mean grey 0.0 (full band), against a median column of 12.1 |
+| `/api/spec.png` with `n=1000` or `n=8192` | 400 |
+| `/api/view.wav` 30–40 s | 10.0000 s at 48 kHz; correlation 1.00000 with the recording (all frequencies, gain only); first and last sample 0 (fades) |
+| `/api/view.wav` 0–120 s | capped at 60.000 s |
+| `/api/view.wav` errors | unknown recording → 400; a ≥ b → 400 |
+| Total | 147 checks, all pass (rerun with the learners wired in and none adopted: 147 / 147; rerun 2026-11-17 with the Raven source from `raven_match.py`, the old no-overlap check replaced by the two above: 147 / 147; rerun 2026-11-17 with the minute-view meta check: 148 / 148; rerun 2026-11-17 with the display and play-view checks above: 168 / 168) |
+| Box refiner in the app (`box_shown.csv`, "box uncertain", refined boxes) | in the [box refiner tests](#box-refiner-edges-on-the-fine-spectrogram-fitted-to-the-reviewers-boxes) |
 | Log | 2 rows; header = `LOG_COLS`; `top5` written; latest row wins; logged status survives a κ change |
 | Restart | added species searchable; prediction cache reloaded |
+| `common_names.csv` | 13,675 rows, scientific names unique, no blank common name |
+| Common names on the Perch top 5 (top 5 in lane + over all classes), 4 lanes | every entry has a `common` field; all 5 Aves names set and equal to eBird's `PRIMARY_COM_NAME` (Ferruginous Pygmy-Owl, Wing-barred Piprites, …); Insecta (Limnos Plump Bush-cricket, …) and Mammalia (Common Marmoset, …) named; Anthropogenic sound events blank |
+| Common names on EarthChirp top 5, 3 boxes | field present; 1 of 12 species entries named (Choctaw ground cricket); the Malaysian katydids (*Lipotactes alienus*, *Promeca perakana*, …) have no English name in GBIF |
+| Cache | the stored predictions carry no `common` field (added when served) |
+| Search by common name | "collared kingfisher" → *Todiramphus chloris*; "ferruginous pygmy" → *Glaucidium brasilianum*; suggestions carry `common` |
+| `common_names.csv` missing | app starts, names blank |
+| `/api/predict`, `/api/box` | top 5 entries carry `common`; `/api/box` maps logged species to common names ("Zzz testbird" → blank) |
 
 Browser test (`ui_test.mjs` in the scratchpad: headless Chrome over CDP, server on port 8766 with a scratch
 `--review-dir`):
@@ -674,14 +1010,1329 @@ Browser test (`ui_test.mjs` in the scratchpad: headless Chrome over CDP, server 
 | Test | Result |
 |---|---|
 | Page load | 15 boxes listed, top 5 shown, 3000 × 513 spectrogram, 6 Raven boxes drawn |
-| Play box / Space / cell-mask play | plays ("box: 4.81–30.50 s, original"); Space stops; cell mask plays 9 cell runs |
+| Play box | plays only the box: 24.6875 s of audio for a 5.3125–30 s box; request has `pad=0`, box only at 6.97–16 kHz |
+| No box number fields | the box shows as text: "5.31–30.00 s · 6.97–16.00 kHz (24.69 s × 9.03 kHz)" |
+| Space / kept-cells play | Space stops; kept cells plays "kept cells within 6.97–16.00 kHz" |
 | Y, 1, 2, 2 | decision yes, top1 ticked, 2 ticked then unticked |
 | Autocomplete "lempiji" + ↓ Enter; free text "Unlisted testus" + Enter | *Otus lempiji* and "Unlisted testus" added, source `added` |
-| Drag on the spectrogram | new box, begin < end and low < high, marked edited |
+| Common names in the page | suggestions read "Otus lempiji · Sunda Scops-Owl"; typing "sunda scops" puts *Otus lempiji* first; chips show the common name (ticked and added) and keep it after a revisit; an Aves box shows all 5 rows as "scientific · common" (Glaucidium hardyi · Amazonian Pygmy-Owl, …); rows with no name show none |
+| Drag on the spectrogram | box = the dragged rectangle (within 0.02 of the pixel-to-axis mapping), marked edited, text updated |
+| Play when drawn | the new box plays at once: 13.9 s of audio for 25.174–39.074 s, band 4.272–11.107 kHz |
+| Hover and drag the right edge | cursor `ew-resize`; end 39.074 → 44.634 s, the other three sides unchanged |
+| Hover and drag the top-left corner | cursor `nwse-resize`; begin 25.174 → 23.61 s and top 11.107 → 12.078 kHz, the other two unchanged |
+| Click inside the box without dragging | box unchanged |
 | Ctrl+Enter | row logged, list marks ✓ with species, moves to the next unreviewed box |
 | Revisit the logged box | decision, 3 species and comment restored |
 | → / change recording / EC box | next box; new recording loads; EC box shows EarthChirp top 5 with levels |
+| Show: sources | 6 checkboxes (box uncertain added with the refiner); model + your boxes on by default and the list holds only model boxes; ticking all lists 122 items (90 model, 19 below threshold, 9 Raven, 4 audit) = every item of the ticked groups, tagged, and remembered |
+| Box uncertain (after the background refining finishes) | 55 boxes uncertain, all model / below threshold, all 55 tagged "box uncertain" in the list; ticked alone, the list holds exactly those 55, least confident first |
+| B, then Esc | new box: no box yet, group menu empty, decision yes, resets and model overlays hidden; Esc returns to the model box it came from |
+| B, drag, Accept, pick Aves | top 5 waits for the group; Accept without one says "pick the box's group"; picking Aves runs Perch on the drawn box (`new|…`) and remembers Aves |
+| Ctrl+Enter on the new box | logged; page returns to the model box; the list holds one "your box" (Aves, yes, the drawn box) |
+| Open your box | group Aves in the menu, history 1, comment kept; reset reads "box as first drawn", no "model box" reset |
+| Audit window | audit card shown, decision card hidden; 15 s window; all 6 groups ticked; Y ignored; "none yet" |
+| Drag in the audit window | starts a new box inside the window, group Aves remembered, top 5 shown; Ctrl+Enter returns to the window, which lists "Aves · 108.00–110.00 s … yes" |
+| Complete (Aves, Amphibia ticked) | `audit_windows.csv` row: complete, "Aves; Amphibia", 1 box, comment; list marks ✓; moves on; header shows 1 audit window complete |
+| JS exceptions | none (39 checks, all pass) |
+
+Rerun after the box refiner was wired in: opening an audit window failed with `KeyError: 'audit'`. The
+start-box lookup knew only Raven and reviewer boxes. Fixed: an audit window opens on the whole window
+(`shown_box` "window"; it never writes a box row because it closes through `/api/audit`). The source
+checks were updated for 6 sources, and the two box uncertain checks were added. 39 / 39 pass.
+
+Rerun after the taxon and species learners were wired in (`APP_VERSION` 4), on a server with none
+adopted: still 6 checkboxes (taxon check stays hidden), 39 / 39 pass. The adopted case has its own
+browser test in [Learners 2 and 3](#learners-2-and-3-taxon-head-and-learned-species-names).
+
+**Rerun after the minute view (2026-11-17).** This test is for the queue, so it now turns the minute
+view off in localStorage before the page loads.
+- On a log holding only the header row, with `--no-learners`: 39 / 39 pass.
+- On a copy of the current log, 6 checks fail, and every failure comes from the data, not the page.
+  - The first box (EC-Insecta 0–62.5 s) was already logged on 2026-11-16 as Orthoptera on a
+    65.3 s box. So "play box" is capped at 30 s, the species lists start with Orthoptera, and with
+    every item of that recording logged, Ctrl+Enter has nothing to move on to.
+  - The adopted species learner adds a learned row above the top 5, so the Aves box shows 6 rows,
+    not 5.
+- The test assumes an unreviewed first box and no learner, which is why the clean run uses an empty
+  log.
+
+**Rerun after the display and play view (2026-11-17)**, on a header-only log and a fresh Chrome
+profile, with the calibration copied from `data/review` (species learner adopted): 39 / 39 pass.
+- The common-names check now reads only the zero-shot table (`table.top:not(.learned)`), as the
+  learners test does, so a learned row above it is not counted as a 6th row.
+- A rerun on the profile of the run before fails 3 checks. The page reopens the box that profile
+  stored, so the test's first box is not the one it expects. The test needs a fresh profile.
+
+**Minute view, browser** (`ui_minute.mjs` in the scratchpad: headless Chrome over CDP, server on
+port 8766 with `--review-dir` set to a copy of `data/review`; recording `S01634_20250228_000000`,
+1199.9 s, 20 minutes; groups at their defaults; shown: model boxes, Raven not matched, your boxes).
+The list checks compare the page with a list built in the test from the full item list (`ALL`),
+without the page's own minute helpers.
+
+| Test | Result |
+|---|---|
+| `/api/meta` | `minute_s` 60; all 134 recordings have `duration_s` and `fmax_khz` |
+| Default | minute view on |
+| Opening the recording | minute 1, view 0–60 s; list = the 8 ticked items overlapping 0–60 s (8 expected), one row each; bar and list header read "minute 1 of 20 · 0:00–1:00" |
+| "minute ▶" | view 60–120 s and the image is asked for that range; list = the 14 items overlapping 60–120 s |
+| `]` then `[` | minute 3, then back to minute 2 |
+| `]` pressed 4 times without waiting | minute 6; the open box is one of minute 6's, its view 300–360 s |
+| Two source ticks at once (model only, then model + Raven + yours) | the list is the second tick's (3 items, as computed), still minute 6 |
+| A box over a minute boundary (the Raven Orthoptera box 0–1199.9 s) | listed in minute 1 and minute 2 |
+| Opening a minute | opens its first unreviewed item, else its first; the open box lies in the minute |
+| → inside the minute | next box, same image (no reload), view still the minute |
+| Click on a drawn box | opens the smallest listed box under the pointer (here EC-Insecta 0–62.5 s) |
+| Drag starting outside the open box | a new box (1–3 s, 13.9–14.9 kHz) whose parent is the open box; view stays 0–60 s |
+| Esc | back to the open box, its box unchanged |
+| Drag starting inside the open box | the box is redrawn (18.65–42.28 s, 8.13–9.17 kHz); no new box |
+| Empty minute (Anthropogenic only, model boxes only: minute 1 lists nothing) | no box open, the minute's spectrogram, Accept disabled, the list says nothing is listed, the hint says to drag around a missed call |
+| Drag in the empty minute, pick Aves, Accept | one row logged (`reviewer` ui-minute, Aves, `model` reviewer, 10–12 s, 4–6 kHz, yes); the page stays on that minute |
+| Minute view off | the whole recording is listed (79 = all ticked items), no minute bar or header, the box's own view (0–66.5 s) |
+| Minute view back on | the minute of the open box |
+| Last minute | view 1140–1199.87 s (the recording's end); "minute ▶" disabled |
+| First minute | "◀ minute" disabled |
 | JS exceptions | none |
+| Total | 26 checks, all pass (rerun 2026-11-17 after the display and play view, with the image key now ending in the window, e.g. `…\|60\|120\|1024`: 26 / 26) |
+
+The first run found two faults, both now fixed:
+- **Fault 1.** Each tick of a group or source starts its own reload. A slower, earlier reload that
+  finished last reopened the minute of its own box. With a whole-recording Raven box, that is
+  minute 1. Fix: `loadRec` applies only the latest reload, and `select` applies only the latest box
+  picked, so a box drawn meanwhile or an empty minute is not replaced.
+- **Fault 2.** A tick reopened the open box's first minute, even when that box (a long one) also
+  covered the minute being viewed. Fix: the minute shown is kept while the open box lies in it.
+
+The real `data/review/annotation_log.csv` was not written to: 6,706 lines before and after, and no
+`ui-minute` row.
+
+**Display and play view, browser** (`ui_display.mjs` in the scratchpad: headless Chrome over CDP,
+fresh profile, server on port 8766 with `--review-dir` set to a copy of `data/review`; recording
+`S01634_20250228_000000`, minute view on):
+
+| Test | Result |
+|---|---|
+| Defaults | brightness 50, contrast 50, grey, 1024 points, 1× |
+| Default colour scale = the old picture | every one of the 256 grey levels maps to 1.5 × its level (0 to −80 dB of the 120 dB PNG), max error 0.5 of a level; note "colour scale 0 to −80 dB … window 21.3 ms, 47 Hz bins"; image 513 rows |
+| Brightness 80 | scale −18 to −98 dB; quieter sounds coloured, the grey image's mean 121.7 → 65.2 |
+| Contrast 90 | scale 0 to −40 dB; the quiet half turns white, mean 121.7 → 223.8 |
+| Back to 50 / 50 | the same image, to 3 decimals of the mean |
+| Colour maps | viridis: quiet colour rgb(68,1,84), coloured (mean rgb 44,149,133); magma: rgb(0,0,4); grey dark: black, grey image |
+| Window 4096 | a new image of 2049 rows, 2996 columns; image key ends in `\|4096`; note 85.3 ms, 12 Hz bins; saved |
+| Window 256 | 129 rows; 5.3 ms |
+| Reload | window 256 and grey dark kept, image 129 rows |
+| Reset | 50 / 50, grey, 1024, image 513 rows, quiet colour white |
+| Click on the time axis at 20 s | play cursor at 20.00 s, within one pixel; box and view unchanged; nothing plays; the handle drawn blue on the axis |
+| P | plays `/api/view.wav` from 20 s to the view's end (60 s); note "view: 0:20–1:00, all frequencies" |
+| P again | stops; the cursor moves to where it stopped (20.93 → cursor 20.94 s) |
+| ▶ play view | plays on from the cursor |
+| Axis click at 40 s while playing | plays on from 40 s |
+| ½× while playing | rate 0.5 at once, `preservesPitch` false, saved; 0.54 s of audio per second |
+| Space | still plays the box (`/api/audio.wav`), at ½× with pitch not preserved; note ends "· ½× speed"; stopping it leaves the play cursor where the view stopped (40.66 s) |
+| 2× | rate 2 |
+| "minute ▶" while the view plays | playback stops; the old cursor is not in the new view (60–120 s) |
+| P with no cursor in the view | starts at the view's start (60 s) |
+| A 120 s view (minute view off) | plays 0–60 s, note "· 60 s at a time"; at the clip's end the cursor moves to 60 s; P then plays 60–120 s, the view unchanged |
+| JS exceptions | none |
+| Total | 32 checks, all pass |
+
+A seek to the clip's end does not work: the server sends no byte ranges, so Chrome cannot seek the
+WAV. The test runs the clip to its end at 16× instead. That is the test only; the page's speeds are
+the five above.
+
+**Raven table export** (`test_raven_export.py` in the scratchpad; the log, `RAVEN_DIR` and the server
+pointed at scratch folders, then one run on a copy of the real log):
+
+| Test | Result |
+|---|---|
+| Format | CRLF line ends; header = the first 9 columns of a real table in `dataset\annotaions`, `Annotation` 10th, then the 6 extra columns |
+| Which rows, keep = yes | 3 of the synthetic log's rows: the newest row of each box wins (a box answered yes, then no, is left out), unknown left out, another recording's rows left out, a yes row with a blank accepted box left out |
+| Order and numbers | begin-time order; −0.0001 s printed `0.000`, not `-0.000`; kHz → Hz (1.0 → `1000.0`, 3.0 → `3000.0`); delta time `2.500`, delta freq `2000.0` |
+| Columns | `Annotation` = the species, else the group; `Source`, `Decision`, `Group` from the row; `View` `Spectrogram 1`, `Channel` 1 |
+| keep = all | 5 rows (yes, no and unknown); the yes-then-no box once, as no |
+| A recording with no reviewed box | the header only, 0 selections |
+| keep = "maybe" | `ValueError` |
+| `export_raven` | one file per recording with a kept box, named `<rec>.Table.1.selections.txt`, bytes = `raven_table`; refuses `RAVEN_DIR` |
+| CLI `--export-raven DIR` | exit 0, "6 selections in 2 tables"; `--export-keep all` writes the same bytes as `raven_table(…, "all")`; `--export-raven dataset/annotaions` exits 1 and leaves the folder unchanged |
+| Copy of the real log | 6,753 selections in 134 tables = the newest yes rows per recording, counted separately; pandas reads every table back with the expected columns |
+| `/api/raven_table.txt` | 200, `Content-Disposition` attachment with the Raven file name, `X-Selections` = the row count, body = `raven_table`; keep=all; unknown recording → 400; bad keep → 400 |
+| `/editor` | 200, 42,816 bytes, title "Audio Editor" (47,156 bytes since "detect calls"; rerun passes) |
+| Real files | `data\review\annotation_log.csv` and `dataset\annotaions` unchanged (md5 before and after) |
+| Total | 26 checks, all pass |
+
+**Zoom, scroll, readout, overview strip and export, browser** (`ui_view.mjs` in the scratchpad:
+headless Chrome over CDP, fresh profile, server on port 8766 with `--review-dir` set to a copy of
+`data\review`; recording `S01634_20250228_000000`):
+
+| Test | Result |
+|---|---|
+| Default | minute view on, view = the open minute |
+| Wheel up 100 px | the view narrows by e^−0.2 (60 → 49.124 s); the time under the mouse stays at 15.014111 s |
+| Lazy image | no image asked for during the wheel (the old one is stretched); 6 steps then a rest load exactly 1 image; the time under the mouse still put after 6 steps |
+| Limits | zoom in stops at 0.5 s; zoom out at 120 s, inside the recording |
+| Shift+wheel 100 px / sideways wheel −100 px | the view moves right / left by 100 px of time (1.881 s at that width), width kept |
+| Shift+drag and middle drag (each) | the view follows the mouse (120 px left = 120 px of time later, 2.258 s), width kept; cursor "grabbing" and the readout's `view` line while dragging; no image while dragging, one on release; the box unchanged; the `view` line goes after release |
+| Readout | `t m:ss.sss  f x.xx kHz  n dB`; the level = the grey PNG at that cell read separately (80 = 80); over the loudest cell about 0 dB; hidden over the frequency axis and off the canvas; time only over the time axis |
+| Drawing a box | the readout adds the box line; its length = the drag (10% of the view); released where it began: no box, the open box unchanged; the box line goes after release |
+| Strip: Raven | all 47 Raven boxes of the recording; 1,979 blue pixels when ticked, 0 when unticked |
+| Strip: minutes | the open minute brighter than the dimmed rest; a click on another minute opens it (minute 4); a click in the open minute centres the view there; near the minute's end the view stops at the minute's end |
+| Strip: drag over 6 positions | the view follows; at most 1 image mid-drag (a 150 ms rest), ≤ 2 in all |
+| Strip with the minute view off | a click at 70% centres the view there, width kept; the wheel zooms out |
+| Export button, yes / every answer | downloads `S01634_20250228_000000.Table.1.selections.txt` from `/api/raven_table.txt`: 78 / 79 selections, header + `X-Selections` rows |
+| Audio editor link | `/editor`, `target=_blank` |
+| JS exceptions | none |
+| Total | 40 checks, all pass |
+
+The first run found one fault, fixed: after a box was drawn or a pan released, the readout kept its
+`box` / `view` line until the mouse moved again. `pointerup` now redraws the readout.
+
+Reruns after these features (2026-11-17): `ui_display.mjs` 32 / 32 and `ui_minute.mjs` 26 / 26, both
+on fresh copies of `data\review`.
+
+## Audio editor: open, record, cut and save audio
+
+`scripts/review_editor.html`, served by the review app at http://127.0.0.1:8765/editor (the
+"audio editor ↗" link in its header opens it in a new tab). A small editor for your own audio files:
+open or record a file, look at its spectrogram, cut / copy / paste / delete, and save the result.
+It runs entirely in the browser tab, and its normal output is the WAV you save, as a download. The
+one exception is **detect calls**, which sends the file to the review app on purpose (below).
+
+- **Open:** "open file…", or drop a file on the page. WAV files (16- and 24-bit PCM, 32-bit float,
+  any channel count) are read by the page itself at their own sample rate, sample for sample. Other
+  formats (MP3, FLAC, OGG, …) are decoded by the browser, at the browser's rate. A file that cannot be
+  decoded gives an error and the open file stays. Opening over unsaved edits asks first.
+- **Record** (● record, or R; again to stop): from the microphone, raw (echo cancellation, noise
+  suppression and automatic gain off). The status line counts the time and the peak level. With no
+  file open the recording becomes the file (`recording_<date><time>`); otherwise it goes in at the
+  cursor (over the selection, if any) like a paste, resampled to the file's rate if the microphone
+  runs at another.
+- **Spectrogram:** computed in the page for the view, one column per pixel, Hann window of 256–4096
+  points; a long view takes the loudest of up to 16 frames per column. Grey dB from the view's
+  loudest (99.9th percentile) down 120 dB, with the review page's brightness, contrast, colours and
+  window controls, and "to … kHz" for the top. The strip under it is the whole file's waveform, with
+  the view framed.
+- **Moving:** wheel zooms in time about the mouse (50 ms up to the whole file); Shift+wheel or a
+  sideways wheel pans; Shift+drag or middle drag pans; the buttons pan, zoom, show the whole file or
+  fit the selection; a click or drag on the strip centres the view there. The spectrogram is
+  recomputed once the view has rested 120 ms. The readout gives time, frequency and level under the
+  mouse as on the review page, plus the selection's length while selecting.
+- **Selecting:** drag across the spectrogram (all frequencies: an edit always covers the full band).
+  Drag a selection's edge (within 6 px) to move only that edge. A click clears the selection and puts
+  the cursor (blue) there. Ctrl+A selects everything; Esc clears the selection.
+- **Editing:**
+  - cut (Ctrl+X), copy (Ctrl+C), paste (Ctrl+V: at the cursor, or over the selection), delete
+    (Delete / Backspace); the pasted audio is selected after a paste;
+  - a clip from another file is resampled to this file's rate (the browser's `OfflineAudioContext`)
+    and matched to its channels: mono is copied to every channel, more channels are mixed down;
+  - the clipboard lives in this tab only (it survives opening another file, not a reload);
+  - undo (Ctrl+Z) and redo (Ctrl+Y or Ctrl+Shift+Z) restore the samples exactly; undo keeps up to
+    50 M samples of changes (all channels), dropping the oldest steps beyond that;
+  - if the view showed the whole file, it still does after an edit; a zoomed view keeps its width.
+- **Play** (▶, or Space; again to stop): the selection, else from the cursor to the end, at 2×–⅛×
+  (pitch moves with speed, as on the review page). A red playhead follows on the spectrogram and the
+  strip.
+- **Save** ("save WAV"): the name in "save as" (`.wav` added when missing; `<name>_edit.wav` offered
+  for an opened file), as 16-bit PCM (x × 32768, rounded and clipped to full scale) or 32-bit float
+  (exact). A 16-bit file opened and saved unedited comes back byte for byte. Saving clears the
+  "edited, not saved" mark.
+- **Detect calls:** sends the open file to the review app, which runs the zero-shot model on it
+  and adds it to the box review list ([New audio](#new-audio-detect-calls-on-a-file-you-add)).
+  - An unedited file goes as the bytes you opened, so the server reads it at its own rate.
+  - A file that was edited or recorded goes as a 32-bit float WAV of what is on screen, named after
+    "save as".
+  - If the server cannot read the original format (an AAC `.m4a`, for example), the editor sends the
+    browser's decoded audio as a WAV instead, automatically.
+  - When the scan is done, the status line gives the model box count and an "open in box review ↗"
+    link (`/?rec=<name>`).
+
+**Browser test** (`ui_editor.mjs` in the scratchpad: headless Chrome over CDP with Chrome's fake
+microphone (`--use-fake-device-for-media-stream`), fresh profile, server on port 8766; test WAVs written
+by the test with known samples; downloads caught in the page):
+
+| Test | Result |
+|---|---|
+| Empty page | nothing open; save, play and edit buttons disabled |
+| Record with no file open (fake microphone, 1.5 s) | becomes the file `recording_<14 digits>`, 1.48–1.54 s at 48 kHz, 2 channels, not all zeros (peak 1.13: Chrome's fake beep goes past full scale); save name ends `.wav`; status while recording "recording 0:01.384 at 48000 Hz · peak 1 dBFS" |
+| Open a 16-bit stereo 48 kHz WAV (3 s: 1 kHz tone left, integer noise right) | 144,000 samples, 2 channels, 48 kHz; info "tone_stereo_48k.wav · 48000 Hz · 2 channels · 0:03.000"; every sample = int16 / 32768; save name `tone_stereo_48k_edit.wav` |
+| Save it unedited as 16-bit, name "roundtrip" | `roundtrip.wav`, 576,044 bytes, byte for byte the opened file |
+| Spectrogram | the whole file, one column per plot pixel (1,380), 512 bins at 1024 points; frequency axis to 24 kHz |
+| Readout | `t 0:01.500  f 0.98 kHz  -11 dB` format; the 1 kHz tone row reads 0.0 dB, 15 kHz (noise only) −71.1 dB |
+| Wheel | e^−0.2 narrower about the mouse, the time under it kept; no recompute until the wheel rests, then one for the new view; zoom in stops at 50 ms; "whole file" |
+| Shift+wheel; middle drag 100 px | pans by the wheel's pixels; drag pans 100 px of time, readout names the view while panning, selection and cursor untouched, the view line goes after release |
+| Strip | a click at 2.5 s centres the view there, kept inside the file (2–3 s for a 1 s view); 16,552 envelope pixels drawn |
+| Select by drag 0.5 → 1.0 s | selection to within a pixel (24,000–48,000 samples), cursor at its start; readout adds "selection 0.500 s"; the bar reads the selection; cut enabled |
+| Drag its right edge to 1.5 s | only that edge moves (24,000–72,000) |
+| Click at 2.0 s | selection cleared, cursor 96,000, cut disabled |
+| Ctrl+C | 0.5 s on the clipboard, the file unchanged, "copied 0.500 s" |
+| Ctrl+X | 0.5 s out, the rest closes up sample for sample; "edited, not saved" |
+| Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z with nothing to redo / Ctrl+Z | the original sample for sample with the cut range selected / the cut again / unchanged / the original |
+| Ctrl+V at 2.0 s | the clip goes in, selected; samples before and after it are the original's |
+| Delete on it | the original again |
+| Paste over a selection | replaces it, sample for sample |
+| Three undos with the button | the original; undo disabled, redo 3 |
+| Ctrl+A, Backspace, Ctrl+Z | an empty file (save and play disabled), then the original, and the view on the whole file again |
+| Delete while zoomed to 1–2 s | the view keeps its 1 s width |
+| Space with a 0–1 s selection at ½× | plays it, playhead moving (0.205 s after 0.4 s), "playing 0:00.000–0:01.000 at ½×"; Space stops |
+| Open another file over unsaved edits, answer cancel | the edited file stays |
+| Open a mono 22,050 Hz WAV (1 s, 3 kHz) | kept at 22,050 Hz; frequency axis "11.03 (all)" |
+| Copy all of it, paste into the 48 kHz stereo file at 1 s | 48,000 samples in, the same on both channels, 2,999.5 Hz by zero crossings; the samples around it are the original's |
+| Open a 32-bit float mono WAV | every sample exact; "opened: float 32-bit WAV" |
+| Paste a stereo clip into it | the two channels mixed, sample for sample (L/2 + R/2) |
+| Save as 32-bit float, "mixed.wav" | format 3, mono, 48 kHz, 32 bits, 28,800 samples, every one exact; "edited" mark cleared; "saved mixed.wav (32-bit float) to your downloads" |
+| 16-bit encoding of 0, ±0.5, ±1, ±2, 1/32768, 0.4/32768 | 0, ±16384, 32767 / −32768, 32767 / −32768, 1, 0 |
+| Open a 24-bit stereo 44.1 kHz WAV | every sample exact |
+| Open a text file named `.wav` | "cannot read not_audio.wav: Unable to decode audio data"; the open file stays |
+| R, R with the tone file open, cursor at 1 s | 1.2 s of recording in at 1 s at 48 kHz, selected; the rest the original's; Ctrl+Z restores the original |
+| JS exceptions | none |
+| Total | 54 checks, all pass |
+
+The first runs found two faults in the editor, both fixed:
+- **Stale cache.** Each opened file restarted its version at 1, and the mono mix (used by the
+  spectrogram, readout and strip) was cached by version. A file opened after the recording was drawn
+  from the recording's samples: every level read ≤ −120 dB and the strip showed the wrong waveform.
+  Versions now come from one counter that never repeats, and opening a file drops the cache. A check
+  that the mono mix and the strip belong to the open file was added.
+- **Zoom stuck at 50 ms.** Deleting everything and then undoing left the view 50 ms wide on a 3 s
+  file, because an edit kept the view's width. Now a view that showed the whole file keeps showing
+  the whole file.
+
+The same `pointerup` readout fix as on the review page applies here.
+
+## New audio: detect calls on a file you add
+
+`scripts/scan_audio.py`, used by the review app. It runs the zero-shot chain that built the
+dataset's caches on a single new file. Once scanned, the file is reviewed like any long-form
+recording: model and below-threshold boxes, tightened boxes, taxon-check items, the top 5,
+playback, the minute view and logging.
+
+There are three ways to add a file:
+
+- **Review page:** "add audio…" in the header.
+- **Audio editor:** "detect calls" (the bytes as opened, or the edit as a WAV).
+- **Command line** (no size cap; the app lists the files at its next start):
+
+```
+.venv-perch\Scripts\python.exe -X utf8 scripts\scan_audio.py my_recording.wav other.flac
+.venv-perch\Scripts\python.exe -X utf8 scripts\scan_audio.py --check 3
+```
+
+Options: `--uploads-dir DIR`, `--review-dir DIR` (whose logs and top-5 cache count as taken names),
+`--device cpu`. `--check N` is the rebuild check below; it writes nothing.
+
+**What happens to a file.**
+1. **Upload.** The file is streamed to disk while its sha256 is computed.
+   - Refused if it is empty, over 1 GiB (browser uploads only), or not audio that libsndfile can
+     read. "Can read" means the first 4,096 frames and the last frame both decode. The reason is
+     shown, and nothing is kept.
+   - The same bytes again give the recording already added, and nothing new is scanned.
+2. **Name.** The file name without extension, cut down to letters, digits, `.`, `_` and `-`. If the
+   name is taken, `-2`, `-3`, … is added. A name is taken if a dataset recording, an added one, or
+   any recording named in the logs or the top-5 cache uses it, so old answers never attach to a new
+   file.
+3. **Scan.** Scans run one file at a time in the background and share the app's Perch session.
+   Windows are 5 s with a 2.5 s hop, cut exactly as `zeroshot_windows.load_windows` cuts them
+   (32 kHz, mono mean, zero-padded past the end). Each window gets:
+   - Perch 2.0 group probabilities, max logits, the embedding and the 16 × 4 cell grid;
+   - EarthChirp cosine and margin on the float16 embedding;
+   - the cell head's 8 lanes;
+   - the silent flag.
+
+   Segments are the rolling maximum over 2 windows, as in the caches. On the laptop GPU this runs
+   at about 19 windows/s: about 25 s for a 20-minute recording, 2–3 s for a 2-minute clip.
+4. **Listing.** The scan's rows are appended behind the cached arrays, so the dataset's rows do
+   not move. The recording is added at the end of the list, in the order files were added.
+5. **Restart.** Scans load from `scans/`. A file is rescanned only if its scan is missing, of
+   another `SCAN_VERSION`, or of other bytes.
+
+**Storage** (`data\uploads`, git-ignored):
+- `audio\<rec>.<ext>`: the file as received;
+- `audio\<rec>.json`: the original name, sha256, bytes, `added_at`, sample rate, channels, duration
+  and format. It is written last, so a recording exists only once it is there;
+- `scans\<rec>.npz`: the scan.
+
+**What differs for added audio.**
+- **No Raven boxes.** There are no Raven tables for it, so "Raven, not matched" is empty.
+- **Logging and export work as usual.** Answers go into `annotation_log.csv`, and "Export Raven
+  table" works.
+- **Left out of the learners.** `review_labels.py` drops every log and audit row whose recording is
+  not in `dataset\`, and prints how many. Such a recording has no train / validation / test split,
+  and every learner is fitted and tested on the dataset's recordings only.
+- **Adopted learners apply.** The thresholds, the box refiner, the taxon head and the learned names
+  are used here like everywhere else.
+- **Needs the caches.** Adding needs the embeddings and cell-map caches; without them "add audio…"
+  is hidden.
+
+### Tests
+
+**Rebuild check** (`scan_audio.py --check 3`). Three dataset recordings are rescanned from their
+WAVs and every output is compared with the caches:
+
+| Test | Result |
+|---|---|
+| Windows | identical to `zeroshot_windows.load_windows` (S01634_20250228_000000) |
+| Group probabilities / max logits | max difference 1.11e-16 / 1.78e-15 (limit 0.01) |
+| EarthChirp cosine / margin | 3.02e-07 (limit 1e-3) |
+| Cell lanes, Perch / EarthChirp | 4.88e-04 / 4.88e-04 (limits 0.01 / 2e-3) |
+| Segments | 2.98e-07 |
+| Embedding cosine | ≥ 1.00000 (limit 0.999) |
+| Model boxes | 387 vs 387, none different (24/24, 190/190, 173/173) |
+| Speed | 18.7 windows/s on CUDA |
+
+**Server test** (`t_upload.py` in the scratchpad, against a review app on a copy of `data\review`
+with a scratch uploads folder). Phase a checks uploading and scanning:
+
+| Test | Result |
+|---|---|
+| Before any upload | `can_add` true, no added recordings |
+| Byte copy of S01634_20250228_000000 | added as `S01634_20250228_000000-2` (the name clashes), scanned in 21–32 s |
+| The copy vs the original | same box counts, duration and top kHz; the same 36 model and below-threshold spans; 0 of 36 tightened boxes differ; the same 3 taxon-check items; the same top 5, on-demand Perch diff 0.0 |
+| The copy's spectrogram, `view.wav`, box detail | all served |
+| The same bytes again | the same recording, `created` false, state done |
+| `my field clip.flac` (120 s, 44.1 kHz stereo 24-bit, cut from S01634_20250303_160000) | `my_field_clip`, 48 windows in about 2 s; 120 s, top 22.05 kHz, original name kept; 33 items (audit, model, near); top 5, playback and a drawn box's top 5 work |
+| 5,000 random bytes | 400 "cannot read …"; no file left |
+| Empty upload | 400 "empty" |
+| A FLAC header plus one byte, name `../../evil\|name.wav` | 400 |
+| The list | 134 → 136 recordings, the added ones last; the original's boxes unchanged |
+
+Phase b restarts the server:
+
+| Test | Result |
+|---|---|
+| Listing | both added recordings listed, in order |
+| Scans | no scan jobs (both loaded from `scans/`) |
+| The copy | boxes still equal the original's |
+| The FLAC again | the same recording, done |
+
+**Logging test** (`t_log_exclude.py`, same server):
+
+| Test | Result |
+|---|---|
+| A yes with a typed species on a `my_field_clip` model box | row written; the page and `/api/meta` count it as reviewed |
+| `labels_from_logs` on that log | "left out (added audio, not in dataset/): 1 log rows, 0 audit rows"; every table identical to the run without the row (box 6,770, taxon 5,338, species 3,174, withheld 6); no label names the recording |
+| The real log (read only) | all 6,809 rows are dataset recordings, nothing left out |
+
+**Browser test** (`ui_addaudio.mjs`, headless Chrome over CDP, same server; three 60 s clips cut
+from dataset recordings; an AAC `.m4a` made with ffmpeg):
+
+| Test | Result |
+|---|---|
+| Page | "add audio…" shown; earlier added recordings labelled `· added (my field clip.flac)` |
+| Add `clip_b.wav`, staying on the box | status "uploading … %" → "detecting calls: n/24 windows" → "calls detected: 4 model boxes"; clip_b opens by itself with its 23 items and spectrogram |
+| Status count | equals the list's count for the ticked groups (4 = 4) |
+| Sidecar | sha256 of the file sent, `WAV PCM_16` |
+| Add `clip_c.wav`, then open another recording before the scan ends | the page stays on that recording and offers "open it", which opens clip_c |
+| `clip_b.wav` again | "already added as clip_b", no new entry |
+| 5,000 random bytes | the server's reason shown ("cannot read …"); list unchanged |
+| `/?rec=clip_b`; `/?rec=nope` | opens clip_b and clears the address; "nope is not in the list (yet)" |
+| Editor: nothing open | detect calls disabled |
+| Unedited `clip_d.flac` | button disabled while sending; "clip_d: calls detected, 3 model boxes (all groups) · open in box review ↗", link `/?rec=clip_d`, new tab; the original FLAC's bytes received (sha256) |
+| Cut 10 s, detect | `clip_d_edit`, a `WAV FLOAT` of 50 s at 48 kHz |
+| Open `tone3k.m4a` over the edit | asks first ("has edits that are not saved"); decoded by the browser, 20 s |
+| Detect on it | the server refuses AAC, the editor says so and sends the decoded WAV: `tone3k`, `WAV FLOAT`, 5 model boxes; no `.m4a` or partial file left |
+| The link's target | `/?rec=clip_d` opens clip_d |
+| JS exceptions | none |
+| Total | 25 checks, all pass |
+
+**Unchanged elsewhere.**
+- The earlier browser suites, rerun on a fresh scratch server: `ui_display` 32/32, `ui_minute`
+  26/26, `ui_editor` 54/54.
+- `ui_view` 40/40. Its first run failed one timing check (two extra spectrogram requests while
+  dragging the strip); the check passed on both reruns.
+- The Raven export tests all pass.
+- `ruff`: `scan_audio.py` and `review_labels.py` are clean; `review_app.py` has only its 8 earlier
+  warnings.
+
+The tests found four faults, all fixed:
+- **Truncated FLAC.** A FLAC header with nothing after it passed `sf.info` and then failed
+  mid-scan. The upload now reads the first and last frames before it accepts a file.
+- **List order after restart.** Added recordings were sorted by path, and Windows ignores case.
+  They are now sorted by `added_at`.
+- **Box counts.** The status counted the boxes of every group, but the list counts only the ticked
+  groups. The page now counts as the list does, and the editor, which has no groups, says "all
+  groups".
+- **Link colour.** The editor's link kept the browser's default blue on the dark theme. It now uses
+  the accent colour.
+
+## Review labels: the logs as box, taxon and species labels
+
+`scripts/review_labels.py` turns the review logs into the labels for three learners: box edges,
+taxon (group) and species. No learning happens in it. It reads only the logs and `config/*.csv`,
+runs on CPU in about 3 s, and rebuilds its tables from scratch on every run. The learners built so
+are `review_calibrate.py` (thresholds, box settings), `box_refine.py` (box edges), `review_taxon.py`
+(taxon head) and `review_species.py` (learned species names).
+
+```
+.venv-perch\Scripts\python.exe -X utf8 scripts\review_labels.py
+```
+
+- `--log`, `--audit`: the logs (default `data\review\annotation_log.csv`, `data\review\audit_windows.csv`).
+- `--out`: where the tables go (default `data\review\labels\`, git-ignored with the rest of `data/review/`).
+- `--shown`: the shown-box log (default `data\review\box_shown.csv`; a missing file is fine).
+- `--species-shown`: the shown-names log (default `data\review\species_shown.csv`; a missing file
+  is fine, and every row then reads as having shown no learned name).
+
+**Which rows count.** Rows of recordings outside `dataset\` (audio added in the app, see
+[New audio](#new-audio-detect-calls-on-a-file-you-add)) are left out; the run prints how many.
+Of the rest, only the newest row of each box or window counts, as in the app. `unknown` gives no
+label of any kind: it is withheld, not negative. A row that says `no` for a group while naming a
+species of that same group contradicts itself, so it is withheld too. Both go to `withheld.csv`
+with the reason; re-logging the box fixes it.
+
+**The rules.**
+
+| Learner | Present / in | Absent / out | Not a label |
+|---|---|---|---|
+| Box edges (`box_labels.csv`) | inside the accepted box of a `yes` | inside the suggested box (`tight_*`) but trimmed off | everything else |
+| Taxon (`taxon_labels.csv`) | `yes`: the lane's group, over the accepted box. Any named species: its group, whatever the decision | `no`: the lane's group, over that box (other groups untouched). In a window closed as complete: the time no box of a ticked group covers | `unknown`; unreviewed boxes; Raven gaps |
+| Species (`species_labels.csv`) | each named name, over the accepted box | none: an unticked top-5 name may still be calling | `unknown` |
+
+- A bird named in an EC-Insecta box marked `no` gives Insecta 0 and Aves 1 for that box.
+- Audit gaps are the only negatives besides a reviewer's `no`. In a complete window, a ticked
+  group's gaps are the window minus that group's present boxes, minus any `unknown` or conflict
+  box of that group (that time is withheld, not counted as absent). A gap is full band, since the
+  reviewer judged the whole window.
+- Edges: `d_*` = accepted − suggested, per edge. `proposal` says what was suggested: `pipeline`
+  (model and below-threshold boxes), `raven` (a Raven box), `none` (a box the reviewer drew, so
+  `d_*` = 0 and only its inside teaches).
+- Species: there are only positives, so "named X above the model's top 1 Y" is the one
+  ranking signal. `top5_rank` (where the name stood) and `model_top1` / `top1_named` give it.
+
+**Names.** A logged name is resolved in this order:
+1. a Perch label (species or sound event), with its Perch index;
+2. an EarthChirp name (species, genus, or the groups Orthoptera / Cicadidae);
+3. a class, order or family named in `perch_class_index.csv` or `perch_genus_taxonomy.csv`;
+4. a genus;
+5. a common name that belongs to one species only (`common_names.csv`); an ambiguous one is not
+   guessed;
+6. a Raven label (`frog`, `orthoptera?`, …).
+
+Anything else is `unresolved`: the species row is kept, but it gives no taxon label. Matching ignores
+case, spaces and underscores. Lineage missing from Perch's index (555 labels have no class) is filled
+from the genus table. An EarthChirp name with no lineage anywhere (12 genera, e.g. *Conocephalus*) is
+Insecta, because EarthChirp's library holds only Orthoptera and Cicadidae.
+
+**Tables.** Every row carries `split` from `data/splits.csv` (the 26 recordings outside it get
+`""`), so a learner can hold out whole recordings, and `audit_window` (the complete window of its
+group it overlaps, if any), which marks the set that recall can be measured on.
+
+| File | One row per | Main columns |
+|---|---|---|
+| `box_labels.csv` | box answered yes | `proposal`, `box_begin_s` / `box_end_s` (the model box), `tight_*`, `accepted_*`, `box_edited`, `d_*`, `kappa`, `box_max_score`, `log_id`, `shown_box` (from `box_shown.csv`; without a side row: `tight` for pipeline boxes, `raven`, `drawn`) |
+| `taxon_labels.csv` | (box or audit gap, group) | `group`, `label` 1/0, `reason` (`decision`, `named`, `decision+named`, `audit_gap`), box, `box_max_score`, `threshold` |
+| `species_labels.csv` | (box, named name) | `name`, `name_source`, `canonical`, `rank`, `genus` … `class`, `group`, `perch_index`, `ec_name`, `matched_by`, `top5_rank`, `model_top1`, `top1_named`, `log_id`, `learned_shown` (from `species_shown.csv`; blank = no learned name was shown: the rows the species learner is scored on) |
+| `audit_labels.csv` | (complete window, ticked group) | `n_boxes`, `covered_s`, `withheld_s`, `gap_s` (they sum to the window) |
+| `withheld.csv` | box giving no label | `decision`, `species`, `reason` |
+
+**The log today** (2026-11-16): 3 rows, 3 boxes. 2 Perch Aves boxes, both edited (Aves 1), and 1
+drawn EC-Insecta box named *Orthoptera* (Insecta 1; species row at rank order). No audit windows
+are closed yet, so there are no negatives. That is too few to fit anything: the plan was about 30
+reviews per lane before a first fit.
+
+**After the Raven rows** (2026-11-17): 6,704 log rows give 6,701 boxes.
+- **Box labels:** 6,699, of which 2,660 edited.
+- **Taxon:** Aves 2,910+ / 1−, Insecta 1,932+ / 0−, Anthropogenic 342+ / 1−, Amphibia 39+,
+  Weather 14+, Mammalia 6+.
+- **Species:** 3,152 rows: 1,462 species, 1,103 order, 587 family.
+- **Withheld:** 0.
+
+**Tests** (`test_review_labels.py` in the session scratchpad; synthetic rows built like
+`review_app.Store.append`, plus logs the app itself wrote):
+
+| Check | Result |
+|---|---|
+| Name resolution, 19 names | Perch species (with index, case and spaces ignored), Perch sound event (Aircraft → Anthropogenic), EarthChirp species / genus / group, class, order, family, genus, unique common name (Sunda Scops-Owl → *Otus lempiji*), Raven labels (`frog`, `orthoptera?`, `unknown` → no group), *Conocephalus fuscus* (blank class in Perch → Insecta), nonsense and empty → unresolved |
+| Ambiguous common name | `cone-headed grasshopper` (2 species) → unresolved, not guessed |
+| Coverage | every 8th of the 2,633 EarthChirp names → Insecta; every 50th Perch species label → itself and its index |
+| `yes` | one box label (pipeline, `d_*` = accepted − tight exactly); Aves 1 over the accepted box; split train |
+| `no` | Aves 0; no box label; nothing withheld |
+| `unknown` (even with a species) | no box, taxon or species row; withheld "unknown" |
+| `no` + a species of the lane's group | withheld as conflict, no rows |
+| Bird named in an EC box marked `no` | Insecta 0 (decision), Aves 1 (named); species row keeps decision no |
+| Aves + frog named on an Aves yes | Aves 1 (decision+named), Amphibia 1 (named) |
+| Unresolved name / EC lane / recording outside the split | species row kept, no taxon row for it / group Insecta / split "" |
+| Latest row wins | yes then no → 0; Raven box re-logged Unknown → Aves → Amphibia gives one box, Amphibia, proposal raven; reviewer box proposal none, `d_*` 0; ids = `review_app.row_id` |
+| Top 5 | named #2 → `top5_rank` 2, top 1 kept, `top1_named` 0; top 1 named → 1 on both rows; a common name matches its top-5 entry; absent name → ""; EarthChirp lower-case names match |
+| Audit window, 0–15 s, Aves and Insecta ticked | Aves gaps exactly 0–2, 5–7, 8–10, 11–12, 13–14 (boxes 2–4, 3–5, 10–11, a bird named in a frog box 12–13, one straddling the edge 14–16; `unknown` 7–8 withheld); gaps label 0, 0–24 kHz, tagged with the window; Insecta with no boxes = one 15 s gap; Amphibia unticked = none |
+| Audit counts | Aves: 5 boxes, covered 6 s, withheld 1 s, gap 8 s (sum 15); positives inside tagged with the window, one at 30 s not; box labels tagged too |
+| Audit edge cases | window re-closed as skipped → nothing; next window 15–30 s: the straddling box covers 15–16 s only (gap 14 s); another recording's box, a `no` box → no cover; a conflict box → withheld 2 s, gap 13 s |
+| Invariants, mixed log of 38 boxes | labels 0/1; no box both present and absent for one group; withheld boxes give no rows; every box in exactly one of taxon rows / withheld; box labels = yes boxes |
+| Command line on the real log | exit 0; 5 files with their columns; 3 boxes, 2 edited, Aves 1 ×2, Insecta 1, *Orthoptera* = order, Insecta |
+| On the headless test's log (11 rows written by the app) | newest state per box; a drawn box logged Amphibia `no` then Aves `yes` → Aves 1 only; "Zzz testbird" unresolved; 2 Raven `unknown` withheld; window closed then skipped → nothing; below-threshold Mammalia `no` → Mammalia 0, split val |
+| On the browser test's log (complete window 105–120 s, Aves + Amphibia) | the drawn Aves box 108–110 s is the only one tagged; Aves gaps 105–108 and 110–120 s; Amphibia = one 15 s gap to 24 kHz; audit labels Aves 1 box, Amphibia 0 |
+| Missing logs | exit 0; 5 empty tables with headers |
+| Logs untouched | `annotation_log.csv` and `audit_windows.csv` not modified |
+| `--species-shown` (CLI on a log the app wrote with an adopted test learner) | with the side file: the row's `learned_shown` = "Testus alpha"; with a missing file: blank; `log_id` filled in both |
+| Total | 87 checks, all pass (rerun after `log_id` / `shown_box` were added: 85 / 85; after `learned_shown`: 87 / 87; after `raven_autolabel.py`: 87 / 87, with the real-log check now read against the log's own newest rows instead of a 3-box snapshot) |
+
+A Raven box logged by `raven_autolabel.py` over several model boxes (a merge) gives one taxon row
+and one row per name, not one per model box: a repeat `raven-auto` row with the same recording and
+accepted box adds no taxon or species rows. Each model box still gets its box row.
+
+## Raven labels as reviews
+
+The Raven tables were drawn by people, so they are human labels. `scripts/raven_autolabel.py` logs
+them into `annotation_log.csv` as `yes` answers, so the learners start from them. Matching is in
+`scripts/raven_match.py`, which the app also uses for its Raven source.
+
+```
+.venv-perch\Scripts\python.exe -X utf8 scripts\raven_autolabel.py            # dry run: counts + plan
+.venv-perch\Scripts\python.exe -X utf8 scripts\raven_autolabel.py --write    # backs up, then appends
+```
+
+- `--review-dir` (default `data\review\`), `--device cuda|cpu` (for the top 5), `--recordings` (default:
+  every recording with Raven boxes, test split included).
+- Every run writes the plan to `data\review\raven_plan.csv`: one row per row to write or skipped, with
+  its kind, why, label, names, lane, box id, IoU, the Raven box and the model box.
+- `--write` first copies `annotation_log.csv`, `box_shown.csv` and `species_shown.csv` to
+  `data\review\backup\<time>\`.
+
+**Matching** (per recording, time only):
+1. A model box counts for a Raven group when its lane is one of the app's `raven_lanes(group)`, the
+   default hybrid lanes, so Insecta matches EC-Insecta only (not Perch Insecta or EC-margin).
+2. Each model box goes to the overlapping Raven box of its group with the highest time IoU; a tie
+   goes to the earlier Raven box. A model box goes to one Raven box only (1:1).
+3. A Raven box is matched when the merged span of its model boxes (first begin to last end) has time
+   IoU ≥ 0.3 with it: **one** (one model box) or **merge** (several).
+4. Otherwise it is **new**: a box the model missed, logged on the Raven box itself. Its model boxes,
+   if any, stay as they are. So is a Raven box whose overlapping model boxes all went to other Raven
+   boxes.
+5. Model boxes no Raven box takes get nothing. They stay in the queue for review and are never
+   negatives. Nothing is deleted.
+
+**What is logged.** Every row: reviewer `raven-auto`, decision `yes`, written by
+`review_app.Store.append`, so the columns and box ids are the app's.
+
+| Kind | Rows | Accepted box | `box_shown.csv` | Used by |
+|---|---|---|---|---|
+| one | one, on the model box | the Raven box (time and frequency) | `raven-auto` | every learner; box refiner and calibration train and evaluate on it |
+| merge | one per model box | the Raven box, on each | `raven-auto merge` | taxon and species count the Raven box once; left out of the box refiner and calibration |
+| new | one, on the Raven box (`model` Raven, the group's default lane) | the Raven box | `raven` | taxon and species |
+
+**Labels.**
+
+| Raven label | Logged as |
+|---|---|
+| `Unknown`, `Unknwon` | skipped: no row, takes no model box (it stays in the app's Raven source) |
+| `Bird`, `bird`, `Birds`, `Bid`, `3 birds`, `Crow`, `Insect`, `Frog`, and the sounds (`Aircraft` and typos, `Gunfire`, `Helicopter`, `Siren`, `Human Voice`, `Rain`, `Thunder`, `Wind`) | the group only: no species |
+| any label ending in `?` | the group only |
+| `Cicada`, `Cicafa` | *Cicadidae* |
+| `Collared Scops Owl` | *Otus lettia* (Perch's Collared Scops-Owl) |
+| `Brown Boobokok` | Brown Boobook |
+| the Pin-striped Tit-Babbler spellings | Pin-striped Tit-Babbler |
+| `Orthoptera`, *Purana ubina*, *Chremistica pontianaka*, the named birds, Raffles' Banded Langur | the label, source `Raven` |
+
+A named row gets the model's top 5 over the Raven box's span (Perch, or EarthChirp for EC-Insecta),
+as the app computes it, so `top5_rank` is comparable with a person's rows. The comment says the
+label and the match (`Raven: Bird; time IoU 0.64`).
+
+**People come first.** A box that already has a log row is left alone: a person's answer is never
+overwritten, and a rerun adds nothing twice. A person's later answer on a box overrides the
+`raven-auto` row as usual (the newest row wins). In the app these boxes show ✓.
+
+**Point boxes.** Five Raven boxes are single clicks, with no time or frequency extent (Bird ×2,
+Banded Woodpecker, Orthoptera, Collared Scops Owl). The log cannot hold a box like that, so they are
+planned as "skip: Raven box has no extent" and stay in the app's Raven source for a person to box.
+
+**Dry run on all 134 recordings** (2026-11-17, CPU, about 50 s): 5,255 distinct Raven boxes, 47
+skipped as Unknown.
+
+| Group | one | merge | new: below the cut | new: model boxes taken by another Raven box | new: no model box | Raven boxes |
+|---|---|---|---|---|---|---|
+| Aves | 424 | 114 | 562 | 649 | 1,158 | 2,907 |
+| Insecta | 208 | 184 | 198 | 1,101 | 209 | 1,900 |
+| Anthropogenic | 96 | 135 | 48 | 12 | 51 | 342 |
+| Amphibia | 12 | 2 | 1 | 0 | 24 | 39 |
+| Weather | 4 | 4 | 2 | 3 | 1 | 14 |
+| Mammalia | 3 | 0 | 1 | 2 | 0 | 6 |
+| All | 747 | 439 | 812 | 1,767 | 1,443 | 5,208 |
+
+- Rows: 6,658 to write (one 743, merge 1,893, new 4,022); 11 skipped because a person already logged
+  the box. None of the 11 is a person's `no`.
+- Model boxes fitted: 2,640 of 16,301 (Aves 750 / 1,882, EC-Insecta 1,291 / 2,619, Anthropogenic
+  564 / 985, Amphibia 19, Weather 20, Mammalia 3). EC-margin and Perch Insecta are never fitted (not
+  default lanes). The other 13,661 stay for review.
+- Names: 3,122 Raven boxes named, 2,086 group only. Top names: Orthoptera 1,071, *Cicadidae* 587,
+  *Otus lettia* 549, Red-legged Crake 350, Brown Boobook 144. Every name resolves to a species,
+  family or order of the right group.
+- Insecta's 1,101 "taken" boxes: a fitted EC-Insecta box (median 15 s) overlaps 1.74 Insecta Raven
+  boxes on average (median Raven box 12.8 s), and 26% of them overlap more than one. 1:1 gives each
+  model box to its best Raven box; the others become new boxes (median 9.2 s).
+- No Raven box is listed twice with different labels.
+
+**Written to the real log** (2026-11-17, GPU top 5). The first `--write` stopped after 4,142 rows on
+the first point box, which failed in the top-5 step before the log's own check; those rows were
+whole and unduplicated. With point boxes skipped, a second `--write` planned 4,142 "logged before"
+and wrote the other 2,511. The log now holds 6,704 rows: 51 by people and 6,653 `raven-auto`
+(one 743, merge 1,893, new 4,017). No box has two rows; every row has its `box_shown.csv` row; all
+4,020 named rows carry a top 5. Backups: `data\review\backup\20261117-010827\` (before any
+Raven row) and `data\review\backup\20261117-101243\`.
+
+**Collared Scops Owl.** The label has no hyphen, so it matches no names table. It is logged under
+Perch's name: *Otus lettia* (Perch label 9443, shown in the app as Collared Scops-Owl). Note that
+`config/perch_targets.csv` flags that the resident scops owl in Singapore is usually Sunda Scops Owl
+(*O. lempiji*), so these 549 boxes may be misidentified. The user chose Perch's naming (2026-11-17).
+
+**The learners on these rows** (2026-11-17; details in each learner's section):
+
+| Learner | Result |
+|---|---|
+| Species names | **adopted**, τ 0.3, 19 prototypes: held-out MRR@5 0.289 → 0.857 [+0.504, +0.633]; beats a most-common-names prior by +0.153 [+0.047, +0.259] |
+| Box settings (κ, row support) | **adopted** for Aves, Anthropogenic, EC-Insecta and all |
+| Box refiner | **adopted** for Aves, Anthropogenic and all; Insecta kept |
+| Thresholds, taxon head | **kept**: Raven gives positives only, and both need negatives (≥ 30) |
+
+Restart the app to load them. The box changes fit Raven's bout-style boxes, at held-out IoU 0.17–0.27.
+
+**Tests** (`test_raven_match.py`, `test_raven_autolabel.py` in the session scratchpad):
+
+| Check | Result |
+|---|---|
+| Every Raven label (51) | maps as agreed: skip / group only / name, typos merged, Cicada → *Cicadidae*; spaces and case trimmed; any `?` label group only |
+| `t_iou` | identical 1, disjoint and touching 0, half overlap 1/3, zero length 0 |
+| one / merge | a model box over its Raven box (IoU 0.6); three model boxes inside one (IoU on the merged span 6.5 / 7.5), listed in time order |
+| The cut | IoU 0.10 → new, the model box kept aside; exactly 0.3 → matched (inclusive) |
+| 1:1 | a model box over two Raven boxes goes to the higher IoU; the other is new ("its model boxes went to other Raven boxes"); a tie goes to the earlier Raven box |
+| Groups | Insecta matches EC-Insecta only, not Perch Insecta or EC-margin; another group's box never matches |
+| Unknown | takes no part and does not take a model box from a labelled one; a model box no Raven box takes is in no entry |
+| Merged span | first begin to last end (a gap inside counts), not the covered share |
+| Dry run, 2 recordings in a copy of the review dir (the people's log before any Raven row) (S01634_20250313_144000; S01634_20250228_000000, which has a person's rows) | exit 0; log and `box_shown.csv` unchanged, no backup; plan has all 3 kinds (56 rows); the 6 boxes a person logged are skipped, and only those |
+| `--write` | backup = the logs as they were; append only; 50 rows = the plan's writes, on the planned box ids, each once; `LOG_COLS`; reviewer `raven-auto`, yes, app version 4 |
+| Rows | accepted box = the Raven box to 3 decimals; new boxes: model Raven, the group's default lane, unedited; fitted boxes keep their model, lane and tightened box as the suggestion; species = the label's names, source Raven; 47 named rows have a top 5 over the Raven span, unnamed none; `box_shown` by kind; no `species_shown.csv` |
+| The app | every written box reads `yes`; Raven source = the new Raven boxes (46) + the skipped ones; matched Raven boxes are not in it; model boxes no Raven box took have no row; no model box removed (132) |
+| Rerun | writes 0; every earlier write is "skip: logged before" |
+| Labels | one taxon positive per Raven box (49 = 49; merges once), group = the Raven box's group; 47 species rows, all resolved, unanchored; box rows = every written row |
+| Box refiner / calibration | merges out, 1:1 in; `raven-auto` in the refiner's evaluation set; new Raven boxes are not pipeline boxes |
+| Point boxes | no time extent, no frequency extent, or neither → "skip: Raven box has no extent"; a box with both → write |
+| A person's later `no` on a merged model box | the box's state is `no`, giving that model box Aves 0; the Raven box keeps its positive through the merge's other boxes; a rerun leaves the box alone |
+| Real review files | untouched |
+| Total | `raven_match`: 21 checks, all pass; `raven_autolabel`: 48 checks, all pass (47, then the point-box check; run from the log's first backup, since the real log now holds the Raven rows) |
+
+## Learner 1: thresholds and box settings from the reviews
+
+`scripts/review_calibrate.py` fits two things to the review labels: each lane's threshold, and the
+box-tightening settings (κ and row support). It runs on CPU in a few seconds and reads the logs
+(through `review_labels.py`, so the labels are always current), `segment_scores.csv` with the
+EarthChirp lanes, and `cell_maps.npy`. It **applies nothing**. It writes recommendations, and
+`perch_viewer.THRESHOLDS`, `KAPPA` and `ROW_SUPPORT` stay as they are until someone edits them.
+
+```
+.venv-perch\Scripts\python.exe -X utf8 scripts\review_calibrate.py
+```
+
+- `--log`, `--shown`: as for `review_labels.py`. No audit file: the thresholds use positives only.
+- `--out`: default `data\review\calibration\`.
+- `--min-pos 30 --min-boxes 20 --min-recordings 3`: the support needed before anything is fitted.
+- `--boot 2000 --seed 0`: the bootstrap.
+
+**When a fitted value counts.** It is marked `adopt` only if it beats the current value on held-out
+recordings. Each recording is left out in turn: the value is fitted on the others and scored on the
+left-out one. The scores are pooled, and the difference is bootstrapped over recordings. `adopt`
+means the 95% interval lies above 0. Too little support gives `keep`, with the reason. A fold whose
+remaining recordings fall below the minimum also keeps the current value, so the held-out gain is a
+cautious estimate.
+
+**(a) Thresholds, per lane: positive vs unlabelled** (user decision 2026-11-17: no negatives). Each
+lane is scored against the positives of its group, from every lane. EC-Insecta, EC-margin and Perch
+Insecta all use the Insecta positives.
+
+- **Units:** every 2.5 s segment of each recording that holds at least one positive of the lane's
+  group. A segment is positive if it overlaps a positive interval by more than 0.05 s; every other
+  segment is unlabelled, not absent. `no` answers, audit gaps and Raven gaps change nothing.
+  Segments without a score are dropped.
+- **Gain** = recall (share of positive segments flagged) − flagged share (of all units). If the
+  positives are a random sample of the group's sounds (SCAR; Elkan & Noto 2008), the gain is
+  (1 − π)(TPR − FPR), so it peaks at the same threshold true negatives would give.
+- **Caveat:** Raven's stitched bout boxes are not such a sample. Their silent stretches count as
+  positive, and calls outside any box count as unlabelled, which pulls fitted thresholds down.
+- The fitted threshold maximises the gain over midpoints between neighbouring unit scores (at most
+  400, plus the current threshold). Ties go to the value nearest the current threshold, so a current
+  threshold that is already best is kept exactly.
+
+**(b) Box settings**, per lane and for all lanes together:
+- **Boxes used:** the `yes` boxes the pipeline suggested (model and below-threshold). Unedited ones
+  count, because they agree with what was shown. Raven and drawn boxes are left out, since nothing
+  was tightened for them. So are boxes that opened on a refined or an earlier accepted box
+  (`shown_box` `refined` / `previous`): their edges were not judged against the tightened box.
+  Model boxes merged into one Raven box (`raven-auto merge`) are left out too: each one's accepted
+  box spans the other boxes as well. A model box fitted 1:1 to a Raven box (`raven-auto`) counts.
+- **Grid:** each box is re-tightened from its model box at κ 0, 0.1, …, 0.9 × row support 0, 0.125,
+  0.25, 0.375, 0.5, 0.75.
+- **Score:** the time × frequency IoU (kHz linear) with the accepted box.
+- **Choice:** the setting with the best mean IoU wins, with ties going to the current setting.
+- **`share_beyond`:** the share of accepted boxes reaching outside the model box (in time, or above
+  16 kHz). No setting can reach those.
+
+`perch_viewer.tighten` and `CellMaps.tighten_boxes` now take `row_support`. The default
+`ROW_SUPPORT` = 0.25 leaves every existing box unchanged.
+
+| File | Contents |
+|---|---|
+| `thresholds.csv` | per lane: current, fitted, `decision`, `reason`, listened `reliability`, support (recordings, positive segments, segments), gain on all units, held-out gain / recall / flagged share (current vs fitted), difference and interval |
+| `threshold_units.csv` | every unit: lane, group, recording, split, label (1 positive, 0 unlabelled), score, segment begin / end |
+| `threshold_curve.csv` | recall, flagged share and gain at every candidate threshold, `is_current` |
+| `box_settings.csv` | per lane and `all`: current and fitted (κ, row support), `decision`, boxes, edited, `share_beyond`, IoU (all, held out), interval |
+| `box_iou.csv` | every box × setting: the re-tightened box, IoU, time IoU, band IoU |
+| `calibration.json` | only the adopted values, the minimum support used, and `threshold_objective` |
+
+**The log today** (2026-11-16): 3 rows give 6 present Aves segments and 2 pipeline boxes in a single
+recording. There are no absent labels and no audit windows. Every lane is `keep` ("too few
+labels"), and `calibration.json` adopts nothing.
+
+**After the Raven rows** (2026-11-17): 5,245 taxon labels; 6,699 yes boxes, 765 of them pipeline
+boxes. The pipeline boxes are 743 Raven 1:1 fits plus the people's; merges are excluded.
+- **Thresholds: all kept.** Raven adds no negatives (Aves 3, the rest 0) and no audit windows.
+- **Box settings (κ, row support):**
+
+| Lane | Setting | Held-out IoU | Decision |
+|---|---|---|---|
+| Aves | (0.5, 0.25) → (0.6, 0.75) | 0.162 → 0.250 [+0.063, +0.114] | adopt |
+| Anthropogenic | → (0.1, 0) | 0.122 → 0.244 [+0.081, +0.192] | adopt |
+| EC-Insecta | → (0.2, 0.375) | 0.149 → 0.168 [+0.009, +0.031] | adopt |
+| all | → (0.6, 0.75) | 0.154 → 0.188 [+0.017, +0.052] | adopt |
+| Amphibia, Mammalia, Weather | — | too few boxes | keep |
+
+Like the refiner, these settings fit Raven's bout-style boxes, so the app's tightened boxes change
+once it restarts.
+
+**Positives only** (2026-11-17, into `data\review\calibration\`, 38 s): 5,309 taxon labels; 6,753
+yes boxes, 803 of them pipeline boxes.
+
+| Lane | Threshold | Held-out gain | Recall | Flagged | Decision |
+|---|---|---|---|---|---|
+| Aves | 0.94 → 0.9163 | 0.240 → 0.332 [+0.061, +0.125] | 0.41 → 0.67 | 0.17 → 0.33 | adopt |
+| Amphibia | 0.128 → 0.1503 | 0.649 → 0.629 [−0.071, +0.007] | 0.85 → 0.81 | 0.20 → 0.18 | keep |
+| Insecta | 0.032 → 0.0401 | 0.040 → 0.046 [+0.001, +0.011] | 0.84 → 0.73 | 0.80 → 0.69 | adopt |
+| Mammalia | — | — | — | — | keep: pos 22 < 30, 1 recording |
+| Anthropogenic | 0.043 → 0.0128 | 0.226 → 0.286 [+0.023, +0.097] | 0.43 → 0.69 | 0.21 → 0.41 | adopt |
+| Weather | 0.011 → 0.0142 | 0.439 → 0.452 [−0.002, +0.030] | 0.96 → 0.94 | 0.52 → 0.49 | keep |
+| EC-Insecta | 0.42 → 0.4169 | 0.075 → 0.074 [−0.002, −0.000] | 0.84 → 0.85 | 0.77 → 0.77 | keep |
+| EC-margin | 0.28 → 0.3533 | 0.096 → 0.126 [+0.017, +0.043] | 0.87 → 0.71 | 0.78 → 0.58 | adopt |
+
+- **These are recommendations.** The app still uses `perch_viewer.THRESHOLDS` (0.94, 0.032, 0.043,
+  0.28 for these lanes) until someone edits them.
+- **Read against the caveat.** Aves and Anthropogenic are lowered, so they flag about twice the
+  time. Raven's long bout boxes count their silent stretches as positive, which rewards a lower
+  threshold. Listen before applying them.
+- Insecta (+0.006) and EC-margin (+0.030) rise; both flag less time for less recall.
+- Box settings are as before: Aves (0.6, 0.75) 0.166 → 0.248 [+0.056, +0.111]; Anthropogenic
+  (0.1, 0); EC-Insecta (0.2, 0.375); all (0.5, 0.75) 0.160 → 0.196 [+0.021, +0.053]. All adopted.
+
+**What to review first.**
+- **Thresholds:** positives in more recordings, especially Amphibia, Weather and Mammalia. Mark a
+  call where it is, not a whole bout, so the positives sit on the calls.
+- **Box settings:** edit (or accept) about 20 model boxes per lane, across at least 3 recordings.
+
+**Tests** (`test_review_calibrate.py` in the session scratchpad):
+- **Synthetic units and boxes:** checks the rules exactly.
+- **Real cell maps and segment scores:** checks agreement with the app.
+- **Synthetic logs in the app's format on 8 real recordings:** a simulated reviewer.
+
+Rewritten 2026-11-17 for positive vs unlabelled. The F1 version's checks (interval merge, absent
+segments, audit-window recall) are gone with the rule.
+
+| Check | Result |
+|---|---|
+| Units, hand-built recordings | every segment of a recording holding a positive (10); positive = overlap > 0.05 s, edge contact is not; the rest unlabelled; `no` and audit-gap rows change nothing; scores are the lane's own; a recording with negatives only, or without scores, gives no units; segments without a score dropped (9 of 10); no positives → an empty table with the unit columns |
+| Lanes and groups | EC-Insecta and Perch Insecta use Insecta positives from any lane, never Aves |
+| Counts, hand-built | at 0.65: positives flagged 2 of 3, flagged 3 of 10 → recall 2/3, flagged 0.3, gain = their difference; score = threshold is flagged; an array of thresholds gives one row each; flag everything → gain 0; no positives → NaN |
+| Support | `MIN` asks for positives, boxes and recordings only; 2 recordings or 20 positive segments → not fitted, current kept, reason names what is short; a lane with no units keeps its threshold; `reliability` carried over |
+| Fit | separable scores → 0.3324, in (0.3, 0.4]; with 40% of the unlabelled being hidden calls (SCAR) still 0.3973, in the gap; clean gap → its midpoint (0.3526), whatever the current value; current inside the gap → kept exactly; no unlabelled segments at all still fits; ≤ 400 candidates + current |
+| Held-out decision, synthetic populations (SCAR, 40% hidden) | current 0.9 on calls scored 0.4–1 → adopt, held-out recall 0.146 → 1.000 vs flagged 0.094 → 0.600; held-out gain = recall − flagged; leaving a recording out by subtracting its counts = refitting on the others; current already best → keep, "fitted = current"; scores unrelated to labels → no adoption ([−0.050, +0.011]); interval over recordings has width |
+| Curve | gain = recall − flagged, maximal at the fitted threshold, current flagged once |
+| IoU | exact on hand boxes (1/7, 1/3, 0) |
+| `tighten` | `row_support` default = the old 0.25 behaviour |
+| Agreement with the app | `tight_box` = `CellMaps.tighten_boxes` on 12 real boxes × 3 settings; reproduces the logged box (900–905 s at κ 0.5 → 901.5625–905.0 s, 0.955–2.864 kHz) |
+| Float trap | the grid's κ are Python floats: against float32 cells `np.float64(0.7)` cut a borderline cell differently from the app's `0.7` (found by the simulated reviewer: one box in 386 at IoU 0.04) |
+| Box fit, synthetic cells | the generating setting scores IoU 1 on every box; accepted at (0.8, 0) → fitted gives IoU 1, adopted (held-out 0.12 → 1.00); accepted = shown → keep; 2 recordings → keep; Raven / drawn boxes excluded; `share_beyond` counts boxes past the end or above 16 kHz; no cell maps → keep |
+| Command line | `--audit`, `--min-neg` and `--min-audit` are gone |
+| Command line, real log | exit 0; 8 lanes; every adopted lane has an interval above 0 and fitted ≠ current, every kept lane a reason; Mammalia (1 recording) kept; `calibration.json` thresholds = the adopted rows, no `audit` key; 6 files; units only in recordings holding a positive of the lane's group, counts = the support columns; `box_iou.csv` = 803 of 803 pipeline boxes × 60 settings |
+| Simulated reviewer: Aves wherever prob ≥ 0.85, half the call runs drawn as boxes, model boxes accepted as tightened at κ 0.7, no negatives (216 rows, 7 recordings where calls cover 10–40% of segments) | Aves 0.94 → 0.85 exactly, adopted: held-out gain 0.095 → 0.732 [+0.558, +0.713], recall 0.13 → 1.00, flagged 0.03 → 0.27; box setting (0.7, 0.25) adopted, IoU 0.68 → 1.00; drawn boxes not box-fitted; other lanes keep; `calibration.json` lists only these; curve max = fitted gain |
+| Simulated reviewer agreeing with the current settings (calls ≥ 0.94, boxes as shown) | threshold kept at 0.94 and box setting kept, both "fitted = current", IoU 1 |
+| Logs untouched | `annotation_log.csv` not modified |
+| `review_labels.py` tests after the new `box_begin_s` / `box_end_s` columns | 85 / 85 still pass |
+| Total | 72 checks, all pass. The F1 version had 62 (rerun after refined / previous starts were excluded: 62 / 62; after `raven-auto merge` was excluded: 62 / 62). The first PU run of the simulated reviewer picked the recordings with the most model boxes: dawn choruses with 95% of segments ≥ 0.85, so no threshold could gain (3 checks failed). It now picks recordings where calls cover 10–40% of segments |
+
+## Box refiner: edges on the fine spectrogram, fitted to the reviewers' boxes
+
+`scripts/box_refine.py`. Perch's boxes snap to its grid: 0.3125 s steps and 4 bands, and the
+tightened box keeps whole cells. The refiner moves each edge onto the call in the spectrogram the
+app draws (1024-point Hann, 10 ms hop: about 21 ms × 47 Hz at 48 kHz). It has four settings, fitted
+to the boxes reviewers accept. This is stage 1: a rule with fitted settings, not a learned model.
+It shows a refined box only for a group where held-out recordings say it helps, and only on boxes it
+is confident about. So it starts out doing nothing and switches on group by group as reviews
+accumulate. It never learns from its own boxes: only reviewers' accepted boxes train it.
+
+```
+.venv-perch\Scripts\python.exe -X utf8 scripts\box_refine.py
+```
+
+- `--log`, `--audit`, `--shown`: the logs (defaults in `data\review\`).
+- `--out`: default `data\review\calibration\`.
+- `--min-boxes 20 --min-recordings 3`: the support needed for a fit. `--boot 2000 --seed 0`.
+- The review app reads `refiner.json` when it starts: restart it after a fit.
+- CPU only; it reads each box's audio ± 5 s from the wav.
+
+**The rule**, for one box:
+1. **Patch:** the coarse box (the tightened box the app suggests) ± 0.5 s in time, and from
+   low / 1.5 to high × 1.5 in frequency. dB is smoothed (Gaussian, 1 bin), minus each frequency
+   bin's 25% quantile over the box ± 5 s (the background).
+2. **Mask:** cells at least delta dB above the background, kept only in the 8-connected regions
+   that touch the coarse box. A call running past the grid box is followed (up to 0.5 s); other
+   sounds in the margin are dropped.
+3. **Edges:** the first and last time column and frequency row holding at least rho × the busiest
+   one's mask cells, widened by pad_t s and pad_f kHz, and clipped to the recording and Nyquist.
+
+Boxes longer than 30 s (bouts, choruses) are not refined. The grid is delta 3, 6, …, 18 dB × rho 0,
+0.05, 0.1, 0.2, 0.3 × pad_t 0, 0.025, 0.05 s × pad_f 0, 0.1, 0.25 kHz: 270 settings. Before any fit,
+(9 dB, 0.1, 0, 0) gives the confidence for the uncertain queue, and nothing is shown refined.
+
+**Confidence**, per box: the lowest IoU between its refined box and the boxes at two kinds of
+neighbouring setting:
+- delta one step up (the stricter threshold; one step down at 18 dB);
+- the settings fitted on each half of the recordings.
+
+Every box is widened by 0.025 s and 0.1 kHz (the smallest pad steps) before the IoU. No region
+touching the coarse box gives 0.
+- **Why only the stricter threshold:** a soft-edged call shrinks under it, and noise attached to
+  the call at this delta drops off. A looser threshold that attaches background noise says nothing
+  against the box at this one. With both directions, a clean 47 dB tone read 0.29.
+- **Why widened:** on a tonal call 0.3 kHz tall, a one-bin shift of each band edge is a plain IoU of
+  0.62.
+- **On a synthetic recording:** noise 0; a tone 13 dB above the background 0.10; a 47 dB tone
+  0.755. It measures edge stability, not loudness. A loud tone's window sidelobes move its band
+  edges with the threshold, so an 18 dB tone can score higher (1.0).
+
+**Which boxes count**
+- **Training:** every `yes` box the pipeline suggested (model and below-threshold boxes), edited
+  or not, less model boxes merged into one Raven box (`raven-auto merge`), whose accepted box spans
+  the other boxes too.
+- **Evaluation:** only boxes the reviewer started from the plain tightened box (`shown_box` `tight`
+  or `tight (control)`), plus model boxes fitted 1:1 to a Raven box (`raven-auto`: the annotator
+  never saw any box of ours, so the edges are an independent judgement). A refined box accepted
+  unedited agrees with what was shown, so it cannot show the refiner was right.
+- **The control share:** once a group is adopted, a fixed 10% of its confident boxes
+  (crc32(box id) % 1000 < 100) open plain anyway, so this test set keeps growing.
+- **Why the side file matters:** a simulated reviewer who accepts every refined box unedited reads,
+  without `box_shown.csv`, as held-out IoU 0.174 → 0.965 and would be adopted. With it, the refiner
+  is kept, evaluated on the 4 boxes shown plain.
+- `review_calibrate.py` leaves out `refined` and `previous` starts for the same reason.
+
+**Adoption**, per group (Aves, Amphibia, Insecta, Mammalia, Anthropogenic, Weather; the EC lanes
+count as Insecta) and for `all`:
+- **Setting:** the best mean IoU with the accepted boxes over the grid; ties go to the one nearest
+  the default.
+- **Cut:** the lowest confidence at which at least 90% of the held-out refined boxes are no worse
+  than the grid box, over at least 10 boxes. No such confidence → `keep`.
+- **Test:** nested leave-one-recording-out. For each held-out recording, the setting and the cut
+  come from the other recordings only (the cut from an inner leave-one-out). The comparison is what
+  the app would show (refined at confidence ≥ cut, else the grid box) against the grid box, as IoU
+  with the reviewer's box, pooled. The difference is bootstrapped over recordings. `adopt` needs
+  the 95% interval above 0 and a cut.
+- **Support:** 20 boxes and 3 recordings for a fit. The nested test needs 2 more recordings, so 5;
+  fewer are reported as too few labels.
+- A group that is not adopted uses the adopted `all` spec, if there is one; otherwise nothing of it
+  is shown refined.
+
+**In the app** ([Review platform](#review-platform-yes--no--unknown-with-a-top-5-species-list)):
+- For an adopted group, a confident box opens on its refined box (dotted), except the 10% control.
+- A box below the cut goes to the "box uncertain" source.
+- Every log row gets a `box_shown.csv` row naming the box it started from.
+
+| File | Contents |
+|---|---|
+| `refiner.json` | version (fit time), the constants, minimum support, and per group: setting, neighbours, half fits, cut, decision, reason |
+| `refine_settings.csv` | per group and `all`: setting, half fits, cut, decision, reason, boxes / control / recordings / edited, IoU of grid and refined box (all), held-out IoU (grid, app, difference, interval), coverage, share no worse, boxes evaluated |
+| `refine_boxes.csv` | every box: grid, accepted and refined box (under the spec the app would use), confidence, both IoUs, `shown_box`, control |
+| `refine_grid.csv` | per group × 270 settings: mean IoU with the accepted boxes |
+
+**The log today** (2026-11-16): 2 pipeline `yes` boxes in 1 recording. Every group is `keep`
+("too few labels"), and nothing is adopted.
+
+**After the Raven rows** (2026-11-17): 767 pipeline yes boxes, 765 of them shown plain. 743 are
+Raven 1:1 fits; merges are excluded.
+
+| Group | Setting | Held-out IoU | Decision |
+|---|---|---|---|
+| Aves | 9 dB, ρ 0.2, +0.05 s, +0.25 kHz; confidence ≥ 0.812 | 0.162 → 0.267 [+0.076, +0.139]; 45% refined, 86% no worse | adopt |
+| Anthropogenic | 6 dB, ρ 0.1, +0.05 s, +0.25 kHz; confidence ≥ 0.330 | 0.122 → 0.221 [+0.038, +0.130]; 77% refined, 99% no worse | adopt |
+| all | 9 dB, ρ 0.2, +0.05 s, +0.25 kHz; confidence ≥ 0.974 | 0.154 → 0.174 [+0.012, +0.030]; 10% refined, 84% no worse | adopt |
+| Insecta | — | no confidence cut keeps 90% of refined boxes no worse | keep |
+| Amphibia, Mammalia, Weather | — | too few boxes (12, 3, 4) | keep |
+
+The target is Raven's box style: one box over a bout, often. The adopted settings move the app's
+boxes toward that style, and IoU stays low in absolute terms.
+
+**What to review for it**
+- Accept or fix about 20 model boxes per group across at least 5 recordings. Ticking "box
+  uncertain" lists the ones the refiner cannot settle.
+- Draw edges the same way each time: the call's visible extent, with the same padding habit. The
+  pads are fitted, so any consistent habit is learnt; an inconsistent one blocks adoption.
+- Fixing a refined box that is wrong still trains the setting, even though it is not used for the
+  test.
+
+**Next (stage 2).** A learned edge model on the same patches, once a few hundred edited boxes
+exist, behind the same control share and confidence gate.
+
+**Tests** (`test_box_refine.py` in the session scratchpad):
+- synthetic patches;
+- a synthetic wav;
+- simulated reviewers;
+- the app on a scratch review folder;
+- an end-to-end run on real recordings;
+- the real log.
+
+| Check | Result |
+|---|---|
+| `iou` | same box 1, disjoint 0, half overlap 1/3 |
+| One 20 dB call in a grid box (synthetic patch) | default edges within 30 ms / 0.1 kHz of the call; IoU with the call 0.970 vs grid box 0.195 |
+| Margin and tails | a separate sound in the margin is dropped; a call running past the grid box is followed (to 1.9 s; grid ends 1.5625 s), but no further than 0.5 s past it; rho 0 keeps a thin tail, rho 0.3 trims it |
+| Pads and clipping | pads widen each edge exactly; clipped at the recording start (0.0 s) and at Nyquist |
+| Threshold | a 12 dB call: box at delta 6, none at delta 18 |
+| Patches | a grid box above the spectrogram's band → none; boxes > 30 s not refined (no file read) |
+| `stft_db` vs `perch_viewer.spectrogram` | max difference 0.0024 dB (float32 vs float64) |
+| 3 kHz tone at 20.0–20.4 s in a wav | refined to (19.983, 20.413 s, 2.836, 3.211 kHz); confidence 0.755 (≥ 0.75), against delta 12 only |
+| Neighbours, `iou_tol` | at 18 dB, one step down; half fits appended, never the setting itself; a one-bin shift of a 0.3 kHz box: widened IoU ≥ 0.75, plain < 0.75 |
+| Call 0.1 s into the file | context clipped, edges found (0.086–0.416 s) |
+| Noise-only box / faint tone (13 dB peak) | confidence 0.000 / 0.101, both below 0.5 and queued as uncertain |
+| Control share | 9.97% of 20,000 ids, the same answer every time |
+| `Refiner` with no `refiner.json` | version `default`, nothing adopted or shown refined, confidence still given; a box too long: not refinable, not uncertain |
+| `Refiner` semantics | adopted groups listed; a group uses its own adopted spec, else adopted `all`, else its own, else the default; confidence ≥ cut → shown refined; below → plain and uncertain; once fitted, the cut (not 0.5) sets the queue |
+| Pad reviewer (the call + 50 ms and 0.25 kHz, 30% faint calls; 8 recordings × 12 boxes) | adopted: held-out IoU 0.278 → 0.958 [+0.653, +0.704]; fitted (9 dB, rho 0, +0.05 s, +0.25 kHz); coverage 99%, 100% no worse, cut 0.751; `refiner.json` entry complete; `all` adopted too |
+| Reviewers who keep the grid box / draw random boxes inside it | kept (no cut keeps 90% no worse) |
+| Lazy reviewer (accepts refined boxes unedited; grid box on the 5% shown plain) | kept, evaluated on the 4 plain boxes of 96; the same reviews with every box treated as plain would adopt (0.174 → 0.965) |
+| Support | 2 recordings: "recordings 2 < 3"; 4 recordings: "recordings 4 < 5" (nested test) |
+| Two groups | one row each plus `all`; box counts add up |
+| `choose_cut` | lowest qualifying confidence (0.2); `min_shown` 12 → none; `p_win` 0.8 → 0.1; empty → none |
+| `review_labels` / `review_calibrate` | `BOX_COLS` end with `log_id`, `shown_box`; `pipeline_boxes` leaves out refined and previous starts; `LOG_COLS` = the real log's header |
+| App, busiest recording (316 model + below-threshold boxes) | all pending on first `/api/boxes`; refined in the background in 20.8 s (66 ms per box); 157 uncertain (50%); Raven / reviewer / audit items carry no refinement; `/api/meta` lists the source and the refiner (default, cut 0.5) |
+| App, logging | nothing adopted → opens on the tightened box, refined not offered; log row in `LOG_COLS`, side row in `SHOWN_COLS`, joined on `log_id`; side row `tight` with the refined box, confidence, the current app version; a second answer → `previous` = the first accepted box; Raven → `raven`; drawn → `drawn`, refined columns blank |
+| App, audit window (`/api/box`) | opens on the window (`window`, start box = the 15 s window); no refinement or uncertain flag; nothing written to the side file. Added after the browser test caught a `KeyError: 'audit'` here |
+| `review_labels` with the side file | box rows carry `log_id` and the newest `shown_box`; without it: `tight` / `raven` / `drawn` |
+| `--no-refiner` | no uncertain source, no refiner in meta, nothing pending, side row `tight` without refinement |
+| End to end: 72 synthetic reviews on the 6 busiest Aves recordings, boxes drawn at (12 dB, 0.05, +0.025 s, +0.1 kHz) | `box_refine.py` exits 0 in 16 s, writes the 4 files; recovers that setting and adopts it (held-out 0.465 → 0.967 [+0.390, +0.607], coverage 96%, 100% no worse); `refine_boxes.csv` one row per box, `refine_grid.csv` 270 settings per group |
+| The app with that `refiner.json` | Aves adopted; of 62 Aves boxes, 55 open refined (start box = refined box) and 7 plain as `tight (control)`, all control ids; an unedited accept of a refined box is logged `refined` and left out of the test and of `review_calibrate` |
+| Real log | exit 0; every group kept ("boxes 2 < 20, recordings 1 < 3"); review files unchanged (md5); nothing written to `data/review/calibration` |
+| Total | 69 checks, all pass (rerun 2026-11-17 with `raven-auto` in the evaluation set and merges excluded: 69 / 69) |
+
+## Learners 2 and 3: taxon head and learned species names
+
+Two learners fitted offline from the review logs. Each builds its labels in memory with
+`review_labels.py`'s rules, so there is no need to run that first.
+Both are built from human answers only: no model output is ever used as a label, `unknown` is
+withheld, and Raven gaps are not negatives. Each writes to `data\review\calibration\` and is read by
+the app at start; restart the app after a refit. Each is adopted only when the test, with whole
+recordings held out, gains with a 95% bootstrap interval (over recordings) above 0. Until then the
+app is the zero-shot app.
+
+```
+.venv-perch\Scripts\python.exe -X utf8 scripts\review_taxon.py
+.venv-perch\Scripts\python.exe -X utf8 scripts\review_species.py
+```
+
+### Taxon head (`review_taxon.py`)
+
+**The question, per group** (Aves, Amphibia, Insecta, Mammalia, Anthropogenic, Weather): is a sound
+of this group in this 2.5 s segment? The zero-shot answer is one lane's threshold on one score; the
+head adds the whole Perch embedding.
+
+- **Labels: positive vs unlabelled** (user decision 2026-11-17: no negatives). Rows are every 2.5 s
+  segment of each recording holding a positive of the group. A segment is positive if it overlaps a
+  positive taxon row by more than 0.05 s. Positive rows are a `yes` on a box of the group's lane, a
+  species of the group named in any box, or a Raven label logged as a review. Every other segment is
+  unlabelled. `no` answers, audit gaps, Raven gaps and `unknown` answers are not used.
+- **Why it can work:** if the positives are a random sample of the group's sounds (Elkan & Noto
+  2008), AUROC(P vs U) = 0.5 × (share of positives hidden in the unlabelled) + (1 − that share) ×
+  AUROC(P vs N). The sign of head − zero-shot is then kept.
+- **Features of a segment** (from the caches, no Perch run): the mean of the L2-normalised Perch
+  window embeddings over the segment (the app's `windows_for_span` windows), L2-normalised again,
+  plus the segment's zero-shot score on the default lane (logit for Perch lanes, the cosine as is
+  for EarthChirp). 1,537 values.
+- **Head:** StandardScaler + logistic regression with balanced classes. Training rows: at most 100
+  per class per recording (`--cap`, seeded draw); scoring uses every segment. C from 0.001 / 0.01 /
+  0.1 / 1 by the pooled AUROC of a grouped 3-fold split over the training recordings (ties: the
+  smaller C).
+- **Test:** 10 grouped folds of whole recordings. Each held-out segment is scored by a head fitted,
+  C included, on the other folds only. Gain = pooled held-out AUROC (P vs U) of the head − that of
+  the zero-shot score, on the same segments. Also reported, not used for the decision: the mean
+  AUROC within each held-out recording (a pooled AUROC also rewards telling recordings apart).
+- **Minimums per group:** 30 positive segments, 5 recordings. Below them: kept, with the reason.
+- **The cut:** the head probability that maximises recall − flagged share on the pooled held-out
+  segments (ties: the higher cut).
+- **In the app** (adopted groups only): runs of segments ≥ the cut where no model box is become the
+  "taxon check" source. A model box whose highest segment probability is under the cut gets a "taxon
+  doubt" tag (see [the queue](#review-platform-yes--no--unknown-with-a-top-5-species-list)).
+
+Options: `--log`, `--out` (default `data\review\calibration\`), `--min-pos`, `--min-recordings`,
+`--cap`, `--boot`, `--seed`, `--groups` (fit only these; `taxon.json` then holds only these),
+`--no-segments`.
+
+| File | What |
+|---|---|
+| `taxon.json` | per group: lane, cut, support (pos, unlabelled, recordings), chosen C, training rows, held-out AUROC of head and zero-shot with the interval, within-recording AUROC, recall / flagged share at the cut and of the zero-shot score at its threshold, decision and reason |
+| `taxon.npz` | per group: scaler mean / scale, coefficients, intercept (keys `group__field`) |
+| `taxon_eval.csv` | every held-out segment: recording, group, start, label, zero-shot, head, fold, C |
+| `taxon_segments.csv` | every 2.5 s segment of the survey re-scored by the adopted heads (skip with `--no-segments`) |
+
+### Learned species names (`review_species.py`)
+
+**The question:** after a reviewer names a species on a box, can the next box of that species show
+the name ahead of the zero-shot top 5? This matters most for species Perch has no class for, or
+ranks low: one named box is enough for the learner to suggest it.
+
+- **Examples** (`species_labels.csv`): every name given to a box. A box's embedding is Perch's
+  spatial cells (16 time × 4 frequency per 5 s window) averaged over the cells the accepted box
+  covers (`box_embed.py`, CPU, cached in `data\review\embeddings\`). A cell counts when its overlap
+  is at least half of the shorter of cell and box, in time and in kHz.
+- **Prototypes:** per (group of the box's lane, name), the mean of its boxes' L2-normalised
+  embeddings. The name is the resolved canonical name, or the text as typed when it resolves to
+  nothing.
+- **Suggestions:** for a box of group G, every G prototype with cosine ≥ τ, best first, at most 3,
+  above the zero-shot top 5; repeats dropped, cut to 5. That merged list is what is scored.
+- **τ** from 0.30–0.95 in steps of 0.05, plus ∞ (= suggest nothing), by MRR@5 of the named names,
+  leaving one recording out at a time; ties go to the higher τ.
+- **Test:** nested. For each recording, prototypes and τ come from the other recordings only. Gain =
+  MRR@5 of the merged list − that of the zero-shot list. A box with two names is scored on each with
+  the other taken out of the list.
+- **Unanchored rows only.** Training uses every named row. Scoring uses only rows where the reviewer
+  saw no learned name (`learned_shown` blank in `species_shown.csv`): every row before adoption,
+  then the 10% control boxes and boxes with nothing above τ. Ticking a suggestion cannot then prove
+  it right. There are only positives: an unticked name may still be calling.
+- **Minimums:** 20 named rows, 5 recordings, 10 evaluation rows, and a name named in two
+  recordings. Below them: kept, with the reason.
+
+Options: `--log`, `--audit`, `--shown`, `--species-shown`, `--out` (default
+`data\review\calibration\`), `--cache` (box embedding cache), `--device cpu|cuda`, `--min-rows`,
+`--min-recordings`, `--min-eval-rows`, `--boot`, `--seed`.
+
+| File | What |
+|---|---|
+| `species.json` | τ, decision and reason, support, held-out MRR of merged and zero-shot lists with the interval, the prototypes' names and counts, `embed_version` |
+| `species_protos.npy` | one 1536-d prototype per `species.json` entry, in order |
+| `species_eval.csv` | one row per held-out evaluation row: its name, τ, the learned and zero-shot ranks |
+| `species_tau.csv` | MRR@5 per τ over all recordings |
+
+The app ignores an adopted learner whose `embed_version` is not the current pooling rule
+(`perch_v2-box-cells-1`): its prototypes would not match today's box embeddings. It stops with an
+error when the prototype count in the npy does not match the JSON.
+
+**The log today** (2026-11-16): both kept, as expected with 3 reviews.
+- Taxon: Aves 2 positives, 0 negatives, 1 recording; Insecta (EC-Insecta) 1, 0, 1; the others
+  none. Every group "too few labels".
+- Species: 1 named row (*Orthoptera*, Insecta), 1 recording: "rows 1 < 20, recordings 1 < 5".
+
+**After the Raven rows** (2026-11-17; [Raven labels as reviews](#raven-labels-as-reviews)):
+- **Taxon: kept for every group.** Aves 2,910+ / 1−, Insecta 1,932+ / 0−, Anthropogenic 342+ / 1−,
+  Amphibia 39+ / 0−, Weather 14+ / 0−, Mammalia 6+ / 0−. Raven gives only positives, so negatives
+  are still the gap.
+- **Species: adopted**, τ 0.3, 19 prototypes from 3,152 named rows in 117 recordings. Every row is
+  scored, since none was shown a learned name.
+  - Held-out MRR@5: zero-shot 0.289 → with learned names 0.857 [+0.504, +0.633].
+  - hit@1: 0.22 → 0.80. hit@5: 0.41 → 0.93.
+  - Learned names are shown on 96% of rows.
+- **Read against a frequency prior,** not just against zero-shot. Three names are 71% of the rows
+  (*Orthoptera* 1,103, *Cicadidae* 587, *Otus lettia* 548). The prior lists each group's 3 most
+  common names in the other recordings ahead of the zero-shot 5, with the same merge.
+  - Micro MRR: prior 0.704, learned 0.857. Learned − prior = +0.153 [+0.047, +0.259] (bootstrap
+    over recordings).
+  - Macro MRR over the 19 names: zero-shot 0.570, prior 0.293, learned 0.854.
+- **Per group:**
+  - Aves: zero-shot 0.613, prior 0.579, learned 0.981.
+  - Insecta: zero-shot 0.040, prior 0.802, learned 0.763. Perch has no class for *Orthoptera* or
+    *Cicadidae*, so that score is mostly the prior, and here learned is slightly below it.
+- **Costs:**
+  - *Surniculus lugubris* drops from 1.000 to 0.267. It is in 1 recording, so held out it has no
+    prototype, and the other names push its zero-shot rank down.
+  - *Presbytis femoralis* (1 recording) is 0 throughout.
+- **Bias:** these are Raven's boxes and names, many of them bout boxes. *Otus lettia* may be
+  *O. lempiji* (see [Raven labels as reviews](#raven-labels-as-reviews)).
+
+**Taxon head, positives only** (2026-11-17, into `data\review\calibration\`, 19 min on CPU): 5,299
+positive taxon labels. 4 groups adopted.
+
+| Group | Positive / segments, recordings | Held-out AUROC P vs U | Within recordings (head better) | Cut: recall, flagged (zero-shot at its threshold) | Decision |
+|---|---|---|---|---|---|
+| Aves | 13,679 / 47,555, 99 | 0.758 → 0.922 [+0.112, +0.227] | 0.807 → 0.918 (90 / 97) | 0.408: 0.87, 0.36 (0.41, 0.17) | adopt |
+| Amphibia | 925 / 5,765, 12 | 0.883 → 0.987 [+0.029, +0.611] | 0.586 → 0.883 (8 / 11) | 0.523: 0.94, 0.18 (0.85, 0.20) | adopt |
+| Insecta (EC-Insecta) | 40,738 / 55,720, 116 | 0.612 → 0.903 [+0.230, +0.354] | 0.484 → 0.888 (83 / 90) | 0.536: 0.87, 0.69 (0.84, 0.77) | adopt |
+| Mammalia | 22 / 481, 1 | — | — | — | keep: pos 22 < 30, recordings 1 < 5 |
+| Anthropogenic | 12,213 / 29,776, 62 | 0.813 → 0.927 [+0.082, +0.147] | 0.746 → 0.862 (53 / 62) | 0.509: 0.83, 0.40 (0.43, 0.21) | adopt |
+| Weather | 1,122 / 2,401, 5 | 0.958 → 0.971 [−0.033, +0.076] | 0.878 → 0.913 (4 / 5) | 0.614: 0.91, 0.44 (0.96, 0.52) | keep |
+
+- **The within-recording AUROC agrees** with the pooled one, so the gain is not only from telling
+  recordings apart.
+- **Amphibia's interval is wide:** 12 recordings, so the low end (+0.029) is close to 0.
+- **The same caveat as the thresholds.** The positives are mostly Raven's bout boxes, so the head
+  learns "inside a bout" as well as "a call". This shows in the share of all survey segments at or
+  above the cut: Aves 0.31, Anthropogenic 0.19, Amphibia 0.08, Insecta 0.63.
+- **In the app** (after a restart): every model box of these 4 groups gets a `taxon_p`. The
+  "taxon check" source lists runs ≥ the cut outside model boxes. With Aves at 0.408 and Insecta at
+  0.536, it will be long. `taxon_segments.csv` (257,472 rows) equals `TaxonHead.segments` on a real
+  recording.
+
+**What to review so they can fit.**
+- **Taxon:** positives in more recordings (at least 5 per group), placed on the calls rather than
+  over whole bouts. Since 2026-11-17 the head uses no negatives, so `no` answers and audit windows do
+  not feed it.
+- **Species:** name species on boxes across recordings; the same species in two or more recordings
+  is what the held-out test can score.
+
+### Tests
+
+**`box_embed.py`** (`test_box_embed.py` in the session scratchpad; a fake Perch run whose cell
+values encode window, time and row, then the real ONNX model):
+
+| Check | Result |
+|---|---|
+| Box key | 3 decimals |
+| Rows picked | a box inside one row → that row; a sliver of a neighbour row not taken; a narrow box across two rows → the one holding half of it; full band → all 4; above 16 kHz → nearest row |
+| Cell mask | a 1 s box → cells 3–5 (cell 6 overlaps 0.125 s, under half a cell); two overlapping windows take the same seconds; a 50 ms box takes its cell; a box off the window falls back to the nearest cells |
+| Pool | the mean of the masked cells |
+| Embed (fake run) | the app's `windows_for_span` windows; 3 cells per window; pooled row = 1 (0.955–2.864 kHz); pooled time = the box's seconds; bad boxes raise |
+| Window memory | the same windows not run again; LRU holds at most its size; evicted windows run again; grids handed over by the app's top-5 run are used; a request for more windows than the LRU holds (14 > 6) returns every grid in order and the LRU stays capped; a box longer than the LRU embeds |
+| Disk cache | one row per box, equal to `embed`; written; reload gives the same vectors with no Perch run; rows of another `EMBED_VERSION` ignored; an index / vector length mismatch stops |
+| Real audio | `PerchSpatial` grid (2, 16, 4, 1536) in 2.6 s including the session; mean of 64 cells = the cached window embedding (cosine 1.0); a full-band box is finite, 1536-d; a second box on the same windows takes 0.000 s |
+| Total | 34 checks, all pass (31, then the long-box checks: on the real log, a Raven box over 256 windows had evicted its own first grids before they were read, `KeyError` in `grids`; grids are now read before the LRU trims) |
+
+**`review_species.py`** (`test_review_species.py`; simulated reviewers: 6 Aves species × 8
+recordings × 5 boxes, embeddings = species direction + recording offset + noise; the zero-shot top 5
+has the true name at rank 4 for 3 species and not at all for the other 3):
+
+| Check | Result |
+|---|---|
+| Helpers | name key = canonical when resolved, typed text otherwise (spaces collapsed); merged list = learned first, repeats dropped, cut to 5; filtered rank; control share 0.099, deterministic, overlap with the refiner's control set 0.010 (independent) |
+| Prototypes | one per (group, name); a box named twice counts once; unit length; suggestions only from the box's group, best first, cut by τ, none at ∞, at most 3 |
+| Rank table | equals the direct computation at every τ; the ∞ column = the zero-shot list |
+| Signal | adopted, τ 0.4; held-out MRR@5 0.125 → 0.997 [+0.866, +0.875]; zero-shot = 3 of 6 species at rank 4 (0.125); species Perch lacks reach the list (> 80%); 6 prototypes of 40 boxes and 8 recordings |
+| Held out | a name only in the held-out recording is never suggested there |
+| No signal | kept; 0.125 → 0.140, no gain beyond 0.02 |
+| Evaluation rows | rows shown learned names train but are not scored (102 of 240 rows scored) |
+| τ choice | ties → the higher τ (∞); no evaluation rows → ∞ |
+| Too few | recordings 3 < 5, rows 8 < 20, no name in two recordings, evaluation rows 5 < 10, no rows: each kept with its reason, empty outputs for no rows |
+| The app's loader | loads adopted; groups; own species first (unnormalised input fine); at most 3, all ≥ τ; other group → none; `embed_version` mismatch → not adopted; kept → no suggestions; missing files → empty; JSON / npy count mismatch raises |
+| Rows from `species_labels.csv` | one box per box id; EC lane → Insecta; typed text kept as key when unresolved; evaluation = nothing learned shown; zero-shot keys from the logged top 5; the box's other name filtered |
+| Total | 59 checks, all pass (rerun 2026-11-17: 59 / 59) |
+
+**`review_taxon.py`** (`test_review_taxon.py`, rewritten 2026-11-17 for positive vs unlabelled; a
+simulated survey of 8 recordings × 120 s, 8 Aves calls of 3 s each, of which only 5 are labelled,
+so 3 stay in the unlabelled time. Window embeddings carry the call direction in proportion to the
+call time covered, and the zero-shot score is weak. Then the CLI and the real caches):
+
+| Check | Result |
+|---|---|
+| Helpers | default lane (Insecta → EC-Insecta, Mammalia → its own lane, no EC → Insecta, unknown → ""); logit for Perch, raw for EC (negative margins kept), clipped at 0 / 1; AUROC = sklearn's with ties, one class → nan; runs |
+| `touches` | an overlap of exactly 0.05 s is edge contact; 0.1 s each side of a boundary marks both segments; several spans OR-ed |
+| `cap_rows` | at most the cap per class per recording, small classes kept whole; same seed → same rows, sorted; another seed → another draw; a cap above every count keeps all |
+| `recall_flagged`, `pu_cut` | score ≥ cut counts as flagged (1.0, 0.75 by hand); an array of cuts; ties go to the higher cut (0.8 by hand); on 2,000 random rows the gain at the cut is within 0.005 of the best on a 1,001-point grid (0.4739 vs 0.4744) |
+| Segment rows | every segment of every recording holding a positive (384); positive = overlap > 0.05 s (80, 10 per recording); the 48 segments of unlabelled calls stay label 0, not dropped; other groups' and label-0 rows ignored; recordings not in the caches dropped |
+| Features | embedding part unit length; last value = logit of the segment's own zero-shot score; `seg_max` excludes touching segments; a missing lane → rows dropped; `segment_features(t0, t1)` = exactly the segments `seg_max` takes the max over, equal to the whole-recording rows; segment embedding = normalised mean of the windows' normalised rows |
+| C choice | one of the 4, an AUROC per C; one recording → the smallest C |
+| Signal (3 of 8 calls unlabelled, cap 20) | adopted; AUROC P vs U 0.774 → 0.870 [+0.069, +0.136]; within recordings 0.771 → 0.921, head better in 8 / 8; cut 0.476 = `pu_cut` of the held-out rows: recall 0.94, flagged 0.39 (zero-shot at 0.94: 0.07, 0.02); every row scored once, held out; support 80 / 304 / 8; final head on the 240 capped rows |
+| Held out | R3 is scored by a head fitted on the other folds' capped rows (the fold's seed), equal to a refit by hand (to 1e-4, float32) |
+| No signal | kept; 0.791 → 0.745 [−0.076, −0.002]; parameters still written |
+| Too few / one class | 3 recordings → "recordings 3 < 5"; a high positive minimum → "pos 80 < 10000"; positives only → "labels hold one class only"; no parameters |
+| The app's loader | adopted groups only; lane and the fitted cut, 0.5 when the spec has none; `prob` = the fitted pipeline's `predict_proba`; one probability per 2.5 s segment; a span's probability = the highest over the segments it overlaps (3 spans); a span over no segment → nan; missing files or adopted without parameters → nothing adopted |
+| CLI | `--audit` gone, `--cap` and `--groups` present; real log, `--groups Mammalia` into a scratch `--out` (6 s): spec holds only Mammalia, kept "too few labels: pos 22 < 30, recordings 1 < 5", PU labels and cap recorded; empty npz, header-only eval and segments; review log untouched |
+| Real caches | 134 recordings, 1536-d, windows in order; one 1,537-value finite row per segment; `segment_features(10, 14)` max = `seg_max`; segment embedding = normalised mean of the normalised windows |
+| Total | 74 checks, all pass. The positive-vs-negative version had 49 (rerun 2026-11-17: 49 / 49). The first PU run had a call signal too weak once 3 of 8 calls were hidden and training was capped at 10 (0.774 → 0.789, not adopted); a sweep over seeds 1, 3, 5 set signal strength 5 and cap 20, adopted on all three (low end ≥ +0.06) |
+
+**The app with adopted learners** (`test_review_app_learners.py`; hand-built learners: an Aves
+species prototype from a real box's embedding, and an Aves taxon head p = sigmoid(logit(zero-shot)
+− logit(c0)), so p ≥ 0.5 exactly when the zero-shot score ≥ c0):
+
+| Check | Result |
+|---|---|
+| No learners | no taxon items or `taxon_p`; no learned names; Perch's class list kept apart from the taxon head |
+| Box embedding in the Store | 1536-d, finite, CPU: 4 windows, 54 cells, 2.18 s; store load 1.4 s |
+| Learned names | the box's own prototype first (cosine ≈ 1); another group's and a far one not shown; version and `common` field; no band or an inverted band → none; a control box → none, flagged; a group with no prototypes → none; a drawn box keyed by recording and span; memoised, no second Perch run |
+| Perch top 5 hands its cells over | with a learner adopted, the grids go to the embedder and Perch does not run twice; without one, labels only |
+| Taxon items (c0 0.6) | adopted for Aves only; 17 items; lane Aves, model `taxon head`, p ≥ cut; none overlaps an Aves model box; every segment in [0.6, threshold), `max_score` their max; tightened inside their run |
+| Doubts | model boxes carry `taxon_p`, a kept group's do not; doubt ⇔ p < cut: 0 of 16 at c0 0.6, 16 of 16 at c0 0.995, p = sigmoid(logit(segment max) − logit(c0)) |
+| HTTP | meta lists taxon check and the learners; `/api/boxes` serves the taxon items with `taxon_p` and `taxon_doubt`; a taxon item opens on its tightened box; `/api/predict` with a band gives the zero-shot 5 plus learned names (none inside the 5), without a band none, works on a taxon item |
+| Logging | `species_shown.csv` header = `SPECIES_SHOWN_COLS`, one row per log row, names shown, control 0, version, keyed by `log_id` and box; a taxon item logged with model `taxon head` and its id; log columns = `LOG_COLS`; learner off → no new side row |
+| Labels from these files | latest row per box wins; the species row carries `learned_shown`; a taxon item is a `pipeline` proposal and its yes an Aves positive |
+| `--no-learners` | in the help |
+| Total | 43 checks, all pass (rerun 2026-11-17: 43 / 43; rerun after the positive-vs-unlabelled head, where a box's probability is the highest of its segments: 43 / 43. The hand-built head has p = sigmoid(logit(segment max) − logit(c0)), which is the same either way) |
+
+**Browser, adopted learners** (`ui_learners.mjs` with `make_ui_learners.py`: headless Chrome over
+CDP, a scratch `--review-dir` holding an Aves prototype "Testus alpha", an Aves head at c0 0.6, and
+an Insecta head that says p ≈ 0 everywhere; recording `S01634_20250228_000000`):
+
+| Check | Result |
+|---|---|
+| Sources | taxon check listed once a head is adopted, off by default; meta names the learners |
+| Doubt tags | the 12 EC-Insecta model boxes are tagged "taxon doubt", doubt ⇔ p < cut; taxon items not listed by default |
+| Taxon check alone | the 4 finds (Aves, tagged "taxon head p=0.xx") by p descending, then the 12 doubts by p ascending |
+| Accept a find | logged with model `taxon head`, lane Aves; `box_shown` = `tight` |
+| Learned names | "Testus alpha" listed above the zero-shot top 5, which keeps its 5 rows; ticking it gives source `learned` |
+| Accept | the log names *Testus alpha*; `species_shown.csv`: `learned_shown` "Testus alpha", control 0, version `ui-sp`, app version 4; 2 rows for 2 Accepts, the first (the taxon find) with none shown |
+| Revisit | the learned name stays ticked |
+| JS exceptions | none |
+| Total | 11 checks, all pass (rerun 2026-11-17 after the minute view, which this queue test turns off before the page loads: 11 / 11; rerun 2026-11-17 after the display and play view: 11 / 11) |
+
+**End to end on the real log:** both learners, writing to a scratch
+`--out`: exit 0, both kept with the reasons above, `taxon_eval.csv` and `taxon_segments.csv` empty
+(nothing adopted). Nothing was written to `data\review\calibration\`.
+
+**Positive-vs-unlabelled head on the real log** (2026-11-17, into `data\review\calibration\`; the
+earlier outputs were backed up first): exit 0. Amphibia, Anthropogenic, Aves and Insecta adopted;
+`TaxonHead.load()` reads the adopted groups with their cuts and lanes (Insecta → EC-Insecta); its
+`segments` equal `taxon_segments.csv` on a real recording for all 4 groups. `annotation_log.csv`,
+`box_shown.csv`, `raven_plan.csv` and `species_shown.csv` are unchanged (sha256).
+
+## Common names for the top 5
+
+`scripts/build_common_names.py` writes `config/common_names.csv`: one English common name per
+scientific name the review app can show (Perch's 14,597 species and EarthChirp's 2,012 species
+prototypes).
+
+```
+.venv-perch\Scripts\python.exe -X utf8 scripts\build_common_names.py             # eBird + GBIF (~15 min)
+.venv-perch\Scripts\python.exe -X utf8 scripts\build_common_names.py --offline   # eBird + cached GBIF only
+```
+
+- **Birds:** the eBird / Clements taxonomy v2025 shipped with bacpipe, joined on Perch's eBird code,
+  else on the scientific name. One name per species (`PRIMARY_COM_NAME`).
+- **Everything else:** GBIF's public species API. Only the scientific name is sent, with a generic
+  User-Agent.
+  - `species/match` with `strict=true`, kingdom Animalia; only an EXACT match is used, and a synonym
+    is followed to its accepted taxon.
+  - Then that taxon's English vernacular names. The name is picked by a fixed rule, with no hand
+    choices: a name flagged preferred (in practice the IUCN Red List's), else the first Catalogue
+    of Life name, else the name given by the most sources.
+  - Up to 4 other English names go to `other_english`. They are searchable in the app but not shown.
+- **Cache:** GBIF answers go to `data/common_names_gbif.jsonl` (git-ignored), so a rerun only asks
+  for names not yet cached.
+
+**Coverage** (run of 2026-11-16; 4,833 names sent to GBIF, 4,643 exact matches, 3,467 with an English
+name, 0 failed requests):
+
+| Names | With a common name |
+|---|---|
+| Perch Aves | 10,218 / 10,222 (100.0%) |
+| Perch Mammalia | 597 / 616 (96.9%) |
+| Perch Amphibia | 1,096 / 1,263 (86.8%) |
+| Perch Insecta | 1,193 / 2,043 (58.4%) |
+| All Perch species | 13,451 / 14,597 (92.1%) |
+| EarthChirp species | 1,197 / 2,012 (59.5%) |
+
+Sources of the 13,675 names: eBird 10,208, IUCN Red List 1,973, Catalogue of Life 1,140, then
+regional checklists (UK Species Inventory 130, Orthoptera of Vermont 53, …).
+
+**Caveat: GBIF names are not one standard.** Non-bird names come from whichever list the rule picks,
+so they can differ from local usage. For example, *Polypedates leucomystax* is "Java Whipping
+Frog" (IUCN), not "Common Tree Frog"; *Duttaphrynus melanostictus* is "Asian common toad" (World
+Register of Marine Species, lower case). Many Southeast Asian insects have no English name at all
+(*Lipotactes alienus*, *Pomponia imperatoria*), and the app then shows the scientific name only. The
+common name is a reading aid: the log keeps the scientific name.
+
+Tests (run after the full build):
+
+| Test | Result |
+|---|---|
+| Offline build (no cache) | 10,208 eBird names; 4,833 left for GBIF; file written |
+| Full build | 4,643 exact / 22 fuzzy / 9 higher rank / 159 no match; fuzzy and higher-rank matches not used |
+| Output | 13,675 rows, scientific names unique, no blank common name |
+| Spot checks | *Macaca fascicularis* Long-tailed Macaque; *Kaloula pulchra* Malaysian Narrowmouth Toad; *Fejervarya limnocharis* Boie's Wart Frog; *Acheta domesticus* House Cricket; *Tettigonia viridissima* Great Green Bush Cricket; *Cynopterus brachyotis*, *Lipotactes alienus* none |
+| Lint | `ruff check scripts/build_common_names.py` clean |
 
 ## Why the class index exists
 
@@ -792,8 +2443,19 @@ scripts/              Perch / EarthChirp zero-shot pipeline (this page)
     insecta_compare.py       EarthChirp vs Perch on Insecta
     cell_maps.py             Perch 16 x 4 cells -> tightened boxes
     perch_viewer.py          viewer helpers, filtered playback
-    review_app.py/.html      local review platform
-config/               Perch class index, taxonomy, target list
+    review_app.py/.html      local review platform (+ Raven table export)
+    review_editor.html       audio editor at /editor: open, record, cut / paste, save WAV, detect calls
+    scan_audio.py            zero-shot scan of a new audio file for the review app (data/uploads)
+    review_labels.py         review logs -> box / taxon / species / audit labels
+    raven_match.py           Raven boxes matched to model boxes (time IoU, 1:1), Raven label -> names
+    raven_autolabel.py       logs the Raven boxes as raven-auto yes rows (fitted, merged, new)
+    review_calibrate.py      learner 1: per-lane thresholds and box settings fitted to the reviews
+    box_refine.py            stage-1 box refiner fitted to reviewers' accepted boxes
+    box_embed.py             box-pooled Perch embeddings (spatial cells under a box), CPU, cached
+    review_taxon.py          learner 2: per-group taxon head on Perch window embeddings
+    review_species.py        learner 3: learned species names from prototypes of named boxes
+    build_common_names.py    English common names (eBird + GBIF) -> config/common_names.csv
+config/               Perch class index, taxonomy, target list, common names
 jobs/                 SLURM job for GPU extraction
 notebooks/            perch_zeroshot_viewer.ipynb (this page); 01_box_viewer, 02_cluster_gallery (biodetect)
 src/biodetect/        Guerrero et al. (2023) package, see BIODETECT.md
