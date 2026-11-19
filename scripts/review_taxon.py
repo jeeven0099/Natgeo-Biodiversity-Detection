@@ -1,17 +1,28 @@
-"""Taxon learner: per group, a logistic head on Perch window embeddings, fitted to positives only.
+"""Taxon learner: per group, a logistic head on Perch window embeddings, fitted to positives, the
+reviewers' "no" answers and the unlabelled time.
 
     .venv-perch\\Scripts\\python.exe -X utf8 scripts\\review_taxon.py
+    .venv-perch\\Scripts\\python.exe -X utf8 scripts\\review_taxon.py --positives-only
 
 The question per group (Aves, Amphibia, Insecta, Mammalia, Anthropogenic, Weather): is a sound of
-this group in this 2.5 s segment? Positive vs unlabelled (user decision 2026-11-17): no negatives.
+this group in this 2.5 s segment? Positive vs unlabelled (user decision 2026-11-17), with the "no"
+answers as negatives (user decision 2026-11-19):
   positive    a segment touching (> EPS_S) a positive taxon row of the group (review_labels.py:
               a yes on a box of the group's lane, a species of the group named in any box, a Raven
               label logged as a review)
+  negative    a segment touching a "no" on a box of the group's lane and no positive of the group
+              (a positive wins: a "no" is about one box, a call elsewhere in the segment still counts)
   unlabelled  every other segment of a recording holding at least one positive of the group
-"no" answers, audit gaps, Raven gaps, unreviewed boxes and "unknown" answers are not used. If the
-positives are a random sample of the group's sounds (Elkan & Noto 2008), a positive-vs-unlabelled
-score ranks like a positive-vs-negative one, and AUC(P vs U) = 0.5 x (share of positives among the
-unlabelled) + (1 - that share) x AUC(P vs N): the sign of head minus zero-shot is kept.
+A recording with negatives but no positive of the group gives its negative segments only.
+Audit gaps, Raven gaps, unreviewed boxes and "unknown" answers are not used. --positives-only drops
+the negatives (they fall back to unlabelled): the 2026-11-17 fit. If the positives are a random
+sample of the group's sounds (Elkan & Noto 2008), a positive-vs-unlabelled score ranks like a
+positive-vs-negative one, and AUC(P vs U) = 0.5 x (share of positives among the unlabelled) +
+(1 - that share) x AUC(P vs N): the sign of head minus zero-shot is kept.
+The head is trained positive (1) vs the rest (0: negatives and unlabelled); negatives are never
+dropped by the cap. AUROC P vs N (positives vs the "no" segments) is reported, not used to decide:
+the "no" boxes are mostly where the zero-shot score was over its threshold, which biases that
+comparison against the zero-shot score.
 
 Features of a segment, read from caches (no Perch run): the mean of the L2-normalised Perch
 embeddings of the 5 s windows over the segment (earthchirp_embeddings.npy is exactly Perch's window
@@ -23,7 +34,7 @@ grouped INNER_FOLDS split over the training recordings (ties: the smaller C).
 
 Test, whole recordings held out: OUTER_FOLDS grouped folds (leave one recording out with fewer
 recordings); each held-out segment is scored by a head fitted (C included) on the other folds only.
-Gain = pooled held-out AUROC (positive vs unlabelled) of the head minus that of the zero-shot score
+Gain = pooled held-out AUROC (positive vs the rest) of the head minus that of the zero-shot score
 on the same segments; bootstrap over recordings. Adopted when the 95% interval is above 0. Too few
 labels (MIN): kept. Also reported, not used for the decision: the mean AUROC within each held-out
 recording holding both classes (a pooled AUROC also rewards telling recordings apart).
@@ -66,7 +77,8 @@ POS_NEG_FOLD = 2                  # a training fold needs this many of each clas
 OUTER_FOLDS, INNER_FOLDS = 10, 3
 LOGIT_EPS = 1e-4
 BOOT, SEED = 2000, 0
-EVAL_COLS = ["recording", "group", "start_s", "label", "zero_shot", "head", "fold", "C"]
+EVAL_COLS = ["recording", "group", "start_s", "label", "negative", "zero_shot", "head", "fold", "C"]
+ROW_COLS = ["recording", "start_s", "label", "negative", "zero_shot"]
 SEG_COLS = ["recording", "start_s", "group", "zero_shot", "head"]
 
 
@@ -184,7 +196,7 @@ class Windows:
 class GroupData:
     group: str
     lane: str
-    rows: pd.DataFrame          # recording, start_s, label (1 positive, 0 unlabelled), zero_shot
+    rows: pd.DataFrame          # ROW_COLS: label 1 positive / 0 not; negative 1 = a "no" segment (label 0)
     X: np.ndarray               # (rows, D + 1)
 
     @property
@@ -192,38 +204,61 @@ class GroupData:
         return self.rows["label"].to_numpy(int)
 
     @property
+    def neg(self) -> np.ndarray:
+        if "negative" not in self.rows:
+            return np.zeros(len(self.rows), bool)
+        return self.rows["negative"].to_numpy(int).astype(bool)
+
+    @property
     def rec(self) -> np.ndarray:
         return self.rows["recording"].to_numpy()
 
 
-def group_data(taxon: pd.DataFrame, win: Windows, group: str, lane: str) -> GroupData:
-    """Every segment of each recording holding a positive of the group (and in the caches)."""
-    pos = taxon[(taxon["group"] == group) & (taxon["label"].astype(int) == 1)]
+def spans(d: pd.DataFrame):
+    return list(zip(d["begin_s"].astype(float), d["end_s"].astype(float), strict=True))
+
+
+def group_data(taxon: pd.DataFrame, win: Windows, group: str, lane: str, negatives: bool = True) -> GroupData:
+    """Every segment of each recording holding a positive of the group (and in the caches), and the
+    negative segments of recordings holding negatives but no positive. Label-0 taxon rows are the
+    negatives (main passes the "no" answers only); negatives=False ignores them."""
+    t = taxon[taxon["group"] == group]
+    lab = t["label"].astype(int)
+    pos, neg = t[lab == 1], t[lab == 0]
+    if not negatives:
+        neg = neg.iloc[:0]
+    pos_recs = set(pos["recording"])
     rows, X = [], []
-    for rec, d in pos.groupby("recording", sort=True):
+    for rec in sorted(pos_recs | set(neg["recording"])):
         if rec not in win.win_rows or rec not in win.seg_by_rec:
             continue
         st, f, sc = win.segment_features(rec, lane)
-        y = touches(st, zip(d["begin_s"].astype(float), d["end_s"].astype(float), strict=True))
-        ok = np.isfinite(sc)
-        rows.append(pd.DataFrame(dict(recording=rec, start_s=st[ok], label=y[ok].astype(int), zero_shot=sc[ok])))
+        y = touches(st, spans(pos[pos["recording"] == rec]))
+        n = touches(st, spans(neg[neg["recording"] == rec])) & ~y
+        ok = np.isfinite(sc) & (n if rec not in pos_recs else True)
+        if not ok.any():
+            continue
+        rows.append(pd.DataFrame(dict(recording=rec, start_s=st[ok], label=y[ok].astype(int),
+                                      negative=n[ok].astype(int), zero_shot=sc[ok])))
         X.append(f[ok])
     if not rows:
-        return GroupData(group, lane, pd.DataFrame(columns=["recording", "start_s", "label", "zero_shot"]),
-                         np.zeros((0, 1), np.float32))
+        return GroupData(group, lane, pd.DataFrame(columns=ROW_COLS), np.zeros((0, 1), np.float32))
     return GroupData(group, lane, pd.concat(rows, ignore_index=True), np.concatenate(X))
 
 
-def cap_rows(y: np.ndarray, rec: np.ndarray, cap: int, seed: int) -> np.ndarray:
-    """Indices keeping at most cap rows per class per recording (seeded draw), in order."""
+def cap_rows(y: np.ndarray, rec: np.ndarray, cap: int, seed: int, always: np.ndarray | None = None) -> np.ndarray:
+    """Indices keeping at most cap rows per class per recording (seeded draw), in order. Rows marked
+    in always (the negatives) are kept whole and not counted against the cap; with none marked, the
+    draw is the same as without always."""
     rng = np.random.default_rng(seed)
     codes, _ = pd.factorize(pd.Series(rec), sort=True)
-    keep = []
+    always = np.zeros(len(codes), bool) if always is None else np.asarray(always, bool)
+    keep = [np.flatnonzero(always)]
     for r in range(codes.max() + 1 if len(codes) else 0):
         for c in (1, 0):
-            k = np.flatnonzero((codes == r) & (y == c))
+            k = np.flatnonzero((codes == r) & (y == c) & ~always)
             keep.append(np.sort(rng.choice(k, cap, replace=False)) if len(k) > cap else k)
-    return np.sort(np.concatenate(keep)) if keep else np.zeros(0, int)
+    return np.sort(np.concatenate(keep)) if len(codes) else np.zeros(0, int)
 
 
 # ---- fitting ----------------------------------------------------------------------------------
@@ -275,8 +310,10 @@ def pu_cut(y: np.ndarray, p: np.ndarray) -> float:
 
 
 def support(gd: GroupData) -> dict[str, int]:
-    y = gd.y
-    return dict(pos=int((y == 1).sum()), unlabelled=int((y == 0).sum()), recordings=int(len(set(gd.rec))))
+    """recordings: those holding a positive (the minimum is on them); negatives may add others."""
+    y, n, rec = gd.y, gd.neg, gd.rec
+    return dict(pos=int((y == 1).sum()), unlabelled=int(((y == 0) & ~n).sum()), negative=int(n.sum()),
+                recordings=int(len(set(rec[y == 1]))), negative_recordings=int(len(set(rec[n]))))
 
 
 def too_few(sup: dict[str, int], mins: dict[str, int]) -> str:
@@ -288,11 +325,11 @@ def evaluate(gd: GroupData, cap: int = CAP, n_boot: int = BOOT, seed: int = SEED
     """Grouped outer folds: each fold's segments scored by a head (C chosen inside) fitted on the
     other folds' recordings only, training rows capped."""
     from sklearn.model_selection import GroupKFold
-    X, y, rec = gd.X, gd.y, gd.rec
+    X, y, rec, neg = gd.X, gd.y, gd.rec, gd.neg
     n = len(set(rec))
     parts = []
     for f, (tr, te) in enumerate(GroupKFold(n_splits=min(OUTER_FOLDS, n)).split(X, y, rec)):
-        tr = tr[cap_rows(y[tr], rec[tr], cap, seed + f)]
+        tr = tr[cap_rows(y[tr], rec[tr], cap, seed + f, neg[tr])]
         if not enough(y[tr]):
             continue
         C, _ = choose_C(X[tr], y[tr], rec[tr], cs)
@@ -300,22 +337,34 @@ def evaluate(gd: GroupData, cap: int = CAP, n_boot: int = BOOT, seed: int = SEED
         parts.append(gd.rows.iloc[te].assign(head=p, fold=f, C=C))
     if not parts:
         return dict(n_eval=0), pd.DataFrame(columns=EVAL_COLS)
-    ev = pd.concat(parts, ignore_index=True).assign(group=gd.group)[EVAL_COLS]
+    ev = pd.concat(parts, ignore_index=True).assign(group=gd.group)
+    if "negative" not in ev:
+        ev["negative"] = 0
+    ev = ev[EVAL_COLS]
     yy, h, zz = ev["label"].to_numpy(int), ev["head"].to_numpy(float), ev["zero_shot"].to_numpy(float)
+    nn = ev["negative"].to_numpy(int).astype(bool)
+    pn = (yy == 1) | nn                                  # positives and "no" segments: AUROC P vs N
     a_head, a_zero = auroc(yy, h), auroc(yy, zz)
     recs = ev["recording"].to_numpy()
     idx = {r: np.flatnonzero(recs == r) for r in sorted(set(recs))}
     keys = list(idx)
     rng = np.random.default_rng(seed)
-    diffs = []
+    diffs, diffs_pn = [], []
     for _ in range(n_boot):
         k = np.concatenate([idx[keys[i]] for i in rng.integers(0, len(keys), len(keys))])
         diffs.append(auroc(yy[k], h[k]) - auroc(yy[k], zz[k]))
+        kp = k[pn[k]]
+        diffs_pn.append(auroc(yy[kp], h[kp]) - auroc(yy[kp], zz[kp]))
     lo, hi = np.nanpercentile(np.array(diffs), [2.5, 97.5]) if np.isfinite(diffs).any() else (np.nan, np.nan)
+    lo_pn, hi_pn = (np.nanpercentile(np.array(diffs_pn), [2.5, 97.5]) if np.isfinite(diffs_pn).any()
+                    else (np.nan, np.nan))
     within = np.array([(auroc(yy[i], h[i]), auroc(yy[i], zz[i])) for i in idx.values() if 0 < yy[i].sum() < len(i)])
     out = dict(n_eval=len(ev), n_eval_recordings=len(keys), n_eval_pos=int(yy.sum()),
-               n_eval_unlabelled=int((yy == 0).sum()), auc_zero=a_zero, auc_head=a_head,
-               ci_lo=float(lo), ci_hi=float(hi), n_within=len(within),
+               n_eval_unlabelled=int(((yy == 0) & ~nn).sum()), n_eval_negative=int(nn.sum()),
+               n_eval_negative_recordings=int(len(set(recs[nn]))), auc_zero=a_zero, auc_head=a_head,
+               ci_lo=float(lo), ci_hi=float(hi),
+               auc_pn_zero=auroc(yy[pn], zz[pn]), auc_pn_head=auroc(yy[pn], h[pn]),
+               ci_pn_lo=float(lo_pn), ci_pn_hi=float(hi_pn), n_within=len(within),
                auc_within_zero=float(within[:, 1].mean()) if len(within) else float("nan"),
                auc_within_head=float(within[:, 0].mean()) if len(within) else float("nan"),
                within_head_better=int((within[:, 0] > within[:, 1]).sum()) if len(within) else 0)
@@ -325,7 +374,9 @@ def evaluate(gd: GroupData, cap: int = CAP, n_boot: int = BOOT, seed: int = SEED
         thr = pv.THRESHOLDS.get(gd.lane, float("nan"))
         rz, fz = recall_flagged(yy, zz, thr)
         out.update(cut=cut, recall_at_cut=float(r), flagged_at_cut=float(fl), zero_threshold=thr,
-                   zero_recall_at_threshold=float(rz), zero_flagged_at_threshold=float(fz))
+                   zero_recall_at_threshold=float(rz), zero_flagged_at_threshold=float(fz),
+                   negative_flagged_at_cut=float((h[nn] >= cut).mean()) if nn.any() else float("nan"),
+                   zero_negative_flagged_at_threshold=float((zz[nn] >= thr).mean()) if nn.any() else float("nan"))
     return out, ev
 
 
@@ -338,7 +389,7 @@ def fit_group(gd: GroupData, mins: dict[str, int] = MIN, cap: int = CAP, n_boot:
     if why:
         return {**entry, "decision": "keep", "reason": why, "C": None}, None, pd.DataFrame(columns=EVAL_COLS)
     ev, ev_df = evaluate(gd, cap, n_boot, seed, cs)
-    k = cap_rows(gd.y, gd.rec, cap, seed)
+    k = cap_rows(gd.y, gd.rec, cap, seed, gd.neg)
     C, aucs = choose_C(gd.X[k], gd.y[k], gd.rec[k], cs)
     m = make_model(C).fit(gd.X[k], gd.y[k])
     sc, lr = m[0], m[-1]
@@ -349,7 +400,7 @@ def fit_group(gd: GroupData, mins: dict[str, int] = MIN, cap: int = CAP, n_boot:
     elif not np.isfinite(ev["auc_zero"]) or not np.isfinite(ev["auc_head"]):
         decision, reason = "keep", "held-out rows hold one class only"
     elif ev["ci_lo"] > 0:
-        decision, reason = "adopt", "held-out AUROC (P vs U) higher than the zero-shot score, interval above 0"
+        decision, reason = "adopt", "held-out AUROC (P vs rest) higher than the zero-shot score, interval above 0"
     else:
         decision, reason = "keep", "held-out gain not shown (interval reaches 0)"
     inner = dict(zip(map(str, cs), aucs, strict=True))
@@ -429,37 +480,56 @@ def main() -> int:
     ap.add_argument("--groups", nargs="+", default=list(GROUPS), choices=GROUPS,
                     help="fit only these (taxon.json then holds only these)")
     ap.add_argument("--no-segments", action="store_true", help="skip taxon_segments.csv")
+    ap.add_argument("--positives-only", action="store_true",
+                    help="ignore the 'no' answers (they fall back to unlabelled): the 2026-11-17 fit")
     args = ap.parse_args()
     mins = {k: getattr(args, f"min_{k}") for k in MIN}
 
-    lab = L.labels_from_logs(L.read_csv_rows(args.log), [])          # positives only: no audit file
+    lab = L.labels_from_logs(L.read_csv_rows(args.log), [])          # no audit file: no audit gaps
     taxon = pd.DataFrame(lab["taxon"], columns=L.TAXON_COLS)
-    taxon = taxon[taxon["label"].astype(int) == 1]
-    print(f"{len(taxon)} positive taxon labels")
+    lab01 = taxon["label"].astype(int)
+    no = (lab01 == 0) & (taxon["reason"] == "decision")              # a reviewer's "no" on a box of the lane
+    taxon = taxon[(lab01 == 1) | (no & (not args.positives_only))]
+    n_no = int((taxon["label"].astype(int) == 0).sum())
+    print(f"{int((taxon['label'].astype(int) == 1).sum())} positive taxon labels, {n_no} 'no' labels"
+          + (" (ignored: --positives-only)" if args.positives_only else ""))
     win = Windows.from_disk()
     spec_groups, params, evs = {}, {}, []
     for g in args.groups:
         lane = default_lane(g)
-        gd = group_data(taxon, win, g, lane)
+        gd = group_data(taxon, win, g, lane, negatives=not args.positives_only)
         entry, p, ev = fit_group(gd, mins, args.cap, args.boot, args.seed)
         spec_groups[g] = entry
         if p is not None:
             params[g] = p
         evs.append(ev)
-        line = (f"  {g:<13} {entry['pos']} positive / {entry['pos'] + entry['unlabelled']} segments in "
-                f"{entry['recordings']} recordings: {entry['decision']}")
+        line = (f"  {g:<13} {entry['pos']} positive / {entry['negative']} negative / "
+                f"{entry['pos'] + entry['negative'] + entry['unlabelled']} segments, {entry['recordings']} recordings"
+                f" (negatives in {entry['negative_recordings']}): {entry['decision']}")
         if entry.get("n_eval"):
-            line += (f"; held-out AUROC P vs U zero-shot {entry['auc_zero']:.3f} -> head {entry['auc_head']:.3f} "
+            line += (f"; held-out AUROC P vs rest zero-shot {entry['auc_zero']:.3f} -> head {entry['auc_head']:.3f} "
                      f"[{entry['ci_lo']:+.3f}, {entry['ci_hi']:+.3f}]; within recordings {entry['auc_within_zero']:.3f}"
                      f" -> {entry['auc_within_head']:.3f}, head better in {entry['within_head_better']}/"
                      f"{entry['n_within']}")
+            if entry.get("n_eval_negative"):
+                line += (f"; P vs N ({entry['n_eval_negative']} negative segments in "
+                         f"{entry['n_eval_negative_recordings']} recordings) {entry['auc_pn_zero']:.3f} -> "
+                         f"{entry['auc_pn_head']:.3f} [{entry['ci_pn_lo']:+.3f}, {entry['ci_pn_hi']:+.3f}]")
         if "cut" in entry and entry.get("recall_at_cut") is not None:
             line += (f"; cut {entry['cut']:.3f}: recall {entry['recall_at_cut']:.2f}, flagged "
                      f"{entry['flagged_at_cut']:.2f} (zero-shot at {entry['zero_threshold']:g}: "
                      f"{entry['zero_recall_at_threshold']:.2f}, {entry['zero_flagged_at_threshold']:.2f})")
+            if entry.get("n_eval_negative"):
+                line += (f"; 'no' segments flagged: head {entry['negative_flagged_at_cut']:.2f}, zero-shot "
+                         f"{entry['zero_negative_flagged_at_threshold']:.2f}")
         print(line + f" ({entry['reason']})", flush=True)
     spec = dict(version=dt.datetime.now().isoformat(timespec="seconds"), kind="logistic head on window embeddings",
-                labels="positive vs unlabelled 2.5 s segments of recordings holding a positive of the group",
+                labels=("positive vs unlabelled 2.5 s segments of recordings holding a positive of the group"
+                        if args.positives_only else
+                        "positive vs the rest (the 'no' segments as negatives, kept whole, and the unlabelled) "
+                        "2.5 s segments of recordings holding a positive of the group, plus the 'no' segments "
+                        "of other recordings"),
+                negatives=not args.positives_only,
                 features="mean of L2-normalised Perch window embeddings over the segment, L2-normalised; "
                          "+ the default lane's zero-shot score (logit for Perch lanes)",
                 cs=list(CS), cap=args.cap, outer_folds=OUTER_FOLDS, inner_folds=INNER_FOLDS, minimum_support=mins,

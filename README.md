@@ -62,6 +62,9 @@ Anthropogenic 0.862, Weather 0.962.
 | Weather | 0.958 → 0.971 [−0.033, +0.076] | keep zero-shot |
 | Mammalia | 22 positives, 1 recording | keep zero-shot |
 
+A fit with the 22 `no` answers as negatives (2026-11-19) gives the same decisions, and moves AUROC by
+at most 0.001. See [Taxon head](#taxon-head-review_taxonpy).
+
 **Learned species names** (19 prototypes): held-out MRR@5 0.289 → 0.859 [+0.506, +0.636];
 hit@1 0.22 → 0.80, hit@5 0.41 → 0.94. Adopted.
 
@@ -2146,11 +2149,21 @@ app is the zero-shot app.
 of this group in this 2.5 s segment? The zero-shot answer is one lane's threshold on one score; the
 head adds the whole Perch embedding.
 
-- **Labels: positive vs unlabelled** (user decision 2026-11-17: no negatives). Rows are every 2.5 s
-  segment of each recording holding a positive of the group. A segment is positive if it overlaps a
-  positive taxon row by more than 0.05 s. Positive rows are a `yes` on a box of the group's lane, a
-  species of the group named in any box, or a Raven label logged as a review. Every other segment is
-  unlabelled. `no` answers, audit gaps, Raven gaps and `unknown` answers are not used.
+- **Labels: positive, negative (`no`) and unlabelled** (user decisions 2026-11-17: positive vs
+  unlabelled; 2026-11-19: the `no` answers count too). Rows are every 2.5 s segment of each recording
+  holding a positive of the group.
+  - **Positive:** a segment that overlaps a positive taxon row by more than 0.05 s. Positive rows are
+    a `yes` on a box of the group's lane, a species of the group named in any box, or a Raven label
+    logged as a review.
+  - **Negative:** a segment that overlaps a `no` on a box of the group's lane and no positive of the
+    group. A positive wins, because a `no` is about one box and a call elsewhere in the same segment
+    still counts. A recording with `no` answers but no positive of the group gives its negative
+    segments only.
+  - **Unlabelled:** every other segment.
+  - Audit gaps, Raven gaps and `unknown` answers are not used. `--positives-only` ignores the `no`
+    answers, which then fall back to unlabelled, and reproduces the 2026-11-17 fit.
+  - **Caveat:** a `no` covers one box's band, but the segment's features are full band. So a `no`
+    segment may still hold the group in another band.
 - **Why it can work:** if the positives are a random sample of the group's sounds (Elkan & Noto
   2008), AUROC(P vs U) = 0.5 × (share of positives hidden in the unlabelled) + (1 − that share) ×
   AUROC(P vs N). The sign of head − zero-shot is then kept.
@@ -2158,15 +2171,24 @@ head adds the whole Perch embedding.
   window embeddings over the segment (the app's `windows_for_span` windows), L2-normalised again,
   plus the segment's zero-shot score on the default lane (logit for Perch lanes, the cosine as is
   for EarthChirp). 1,537 values.
-- **Head:** StandardScaler + logistic regression with balanced classes. Training rows: at most 100
-  per class per recording (`--cap`, seeded draw); scoring uses every segment. C from 0.001 / 0.01 /
-  0.1 / 1 by the pooled AUROC of a grouped 3-fold split over the training recordings (ties: the
-  smaller C).
+- **Head:** StandardScaler + logistic regression with balanced classes, trained positive (1) vs
+  the rest (0: negatives and unlabelled). Training rows: at most 100 positive and 100 unlabelled per
+  recording (`--cap`, seeded draw). Negatives are always kept and not counted against the cap. Scoring
+  uses every segment. C from 0.001 / 0.01 / 0.1 / 1 by the pooled AUROC of a grouped 3-fold split over
+  the training recordings (ties: the smaller C).
 - **Test:** 10 grouped folds of whole recordings. Each held-out segment is scored by a head fitted,
-  C included, on the other folds only. Gain = pooled held-out AUROC (P vs U) of the head − that of
-  the zero-shot score, on the same segments. Also reported, not used for the decision: the mean
-  AUROC within each held-out recording (a pooled AUROC also rewards telling recordings apart).
-- **Minimums per group:** 30 positive segments, 5 recordings. Below them: kept, with the reason.
+  C included, on the other folds only. Gain = pooled held-out AUROC (P vs rest) of the head − that of
+  the zero-shot score, on the same segments.
+- **Also reported, not used for the decision:**
+  - the mean AUROC within each held-out recording (a pooled AUROC also rewards telling recordings
+    apart);
+  - AUROC P vs N (positives vs the `no` segments only), with its interval;
+  - the share of `no` segments flagged at the cut and by the zero-shot score at its threshold.
+
+  P vs N is not used to decide because the `no` boxes are mostly where the zero-shot score was over
+  its threshold, which biases that comparison against the zero-shot score.
+- **Minimums per group:** 30 positive segments, 5 recordings holding a positive. Below them: kept,
+  with the reason.
 - **The cut:** the head probability that maximises recall − flagged share on the pooled held-out
   segments (ties: the higher cut).
 - **In the app** (adopted groups only): runs of segments ≥ the cut where no model box is become the
@@ -2175,13 +2197,13 @@ head adds the whole Perch embedding.
 
 Options: `--log`, `--out` (default `data\review\calibration\`), `--min-pos`, `--min-recordings`,
 `--cap`, `--boot`, `--seed`, `--groups` (fit only these; `taxon.json` then holds only these),
-`--no-segments`.
+`--no-segments`, `--positives-only`.
 
 | File | What |
 |---|---|
-| `taxon.json` | per group: lane, cut, support (pos, unlabelled, recordings), chosen C, training rows, held-out AUROC of head and zero-shot with the interval, within-recording AUROC, recall / flagged share at the cut and of the zero-shot score at its threshold, decision and reason |
+| `taxon.json` | `negatives` (true unless `--positives-only`); per group: lane, cut, support (pos, unlabelled, negative, recordings holding a positive, recordings holding a negative), chosen C, training rows, held-out AUROC of head and zero-shot (P vs rest) with the interval, AUROC P vs N with its interval, within-recording AUROC, recall / flagged share at the cut and of the zero-shot score at its threshold, share of `no` segments flagged by each, decision and reason |
 | `taxon.npz` | per group: scaler mean / scale, coefficients, intercept (keys `group__field`) |
-| `taxon_eval.csv` | every held-out segment: recording, group, start, label, zero-shot, head, fold, C |
+| `taxon_eval.csv` | every held-out segment: recording, group, start, label (1 positive), negative (1 = a `no` segment), zero-shot, head, fold, C |
 | `taxon_segments.csv` | every 2.5 s segment of the survey re-scored by the adopted heads (skip with `--no-segments`) |
 
 ### Learned species names (`review_species.py`)
@@ -2297,6 +2319,31 @@ are left out. The same 4 groups are adopted.
 - Aves' cut fell from 0.408 to 0.384, flagging 37% of segments rather than 36%.
 - Insecta, Anthropogenic and Weather are unchanged, with the same positive counts as before.
 
+**With the `no` answers (2026-11-19).** The log is the same as on 2026-11-18: 5,316 positive and 22
+`no` taxon labels, with the 107 rows on added audio left out. Both fits were run into scratch folders
+with `--no-segments`: once by default, which uses the `no` answers as negatives, and once with
+`--positives-only`. The `--positives-only` fit reproduces the 2026-11-18 table above exactly.
+
+| Group | Negative segments (recordings) | P vs rest: with `no` / positives only | Cut: with `no` / positives only | P vs N, zero-shot → head [CI] | `no` segments flagged: head / zero-shot | Decision |
+|---|---|---|---|---|---|---|
+| Aves | 7 (3) | 0.922 / 0.921 | 0.390 / 0.384 | 0.406 → 0.818 [+0.232, +0.524] | 0.57 / 0.86 | adopt |
+| Amphibia | 12 (2) | 0.986 / 0.985 | 0.571 / 0.524 | 0.900 → 0.911 [−0.219, +0.545] | 0.50 / 0.00 | adopt |
+| Insecta (EC-Insecta) | 1 (1) | 0.903 / 0.903 | 0.548 / 0.536 | 0.329 → 0.998 [+0.609, +0.726] | 0.00 / 1.00 | adopt |
+| Mammalia | 8 (2) | — | — | — | — | keep: pos 22 < 30, recordings 1 < 5 |
+| Anthropogenic | 5 (4) | 0.927 / 0.927 | 0.499 / 0.509 | 0.181 → 0.923 [+0.674, +0.823] | 0.20 / 1.00 | adopt |
+| Weather | 0 | 0.971 / 0.971 | 0.614 / 0.614 | — | — | keep |
+
+- **The decisions do not change.** The same 4 groups are adopted, and the main AUROC moves by at most
+  0.001. With 0–12 negative segments per group among thousands of rows, the `no` answers carry
+  almost no weight in the fit.
+- **The cuts move a little.** Amphibia rose from 0.524 to 0.571, with recall 0.93 (was 0.94) and
+  0.16 flagged (was 0.17). Aves and Insecta rose slightly, and Anthropogenic fell.
+- **P vs N is too thin to read.** These are 1–12 segments in 1–4 recordings. Most `no` boxes came
+  from where zero-shot fired, so P vs N is biased against zero-shot by construction. It is reported
+  only, and the decision stays on P vs rest.
+- **Where the head still over-calls.** The head flags half of Amphibia's `no` segments, where
+  zero-shot flags none. It flags 57% of Aves' `no` segments, against 86% for zero-shot.
+
 **Species after active learning** (2026-11-18): adopted, τ 0.3, 19 prototypes from 3,174 named
 rows on 3,174 boxes in 117 recordings.
 - Held-out MRR@5: zero-shot 0.289 → with learned names 0.859 [+0.506, +0.636].
@@ -2305,8 +2352,8 @@ rows on 3,174 boxes in 117 recordings.
 
 **What to review so they can fit.**
 - **Taxon:** positives in more recordings (at least 5 per group), placed on the calls rather than
-  over whole bouts. Since 2026-11-17 the head uses no negatives, so `no` answers and audit windows do
-  not feed it.
+  over whole bouts. Since 2026-11-19 `no` answers feed it as negatives, and more of them, spread
+  over recordings, are what would make P vs N readable. Audit windows still do not feed it.
 - **Species:** name species on boxes across recordings; the same species in two or more recordings
   is what the held-out test can score.
 
@@ -2346,7 +2393,8 @@ has the true name at rank 4 for 3 species and not at all for the other 3):
 | Rows from `species_labels.csv` | one box per box id; EC lane → Insecta; typed text kept as key when unresolved; evaluation = nothing learned shown; zero-shot keys from the logged top 5; the box's other name filtered |
 | Total | 59 checks, all pass (rerun 2026-11-17: 59 / 59) |
 
-**`review_taxon.py`** (`test_review_taxon.py`, rewritten 2026-11-17 for positive vs unlabelled; a
+**`review_taxon.py`** (`test_review_taxon.py`, rewritten 2026-11-17 for positive vs unlabelled and
+extended 2026-11-19 for the `no` answers; a
 simulated survey of 8 recordings × 120 s, 8 Aves calls of 3 s each, of which only 5 are labelled,
 so 3 stay in the unlabelled time. Window embeddings carry the call direction in proportion to the
 call time covered, and the zero-shot score is weak. Then the CLI and the real caches):
@@ -2357,7 +2405,9 @@ call time covered, and the zero-shot score is weak. Then the CLI and the real ca
 | `touches` | an overlap of exactly 0.05 s is edge contact; 0.1 s each side of a boundary marks both segments; several spans OR-ed |
 | `cap_rows` | at most the cap per class per recording, small classes kept whole; same seed → same rows, sorted; another seed → another draw; a cap above every count keeps all |
 | `recall_flagged`, `pu_cut` | score ≥ cut counts as flagged (1.0, 0.75 by hand); an array of cuts; ties go to the higher cut (0.8 by hand); on 2,000 random rows the gain at the cut is within 0.005 of the best on a 1,001-point grid (0.4739 vs 0.4744) |
-| Segment rows | every segment of every recording holding a positive (384); positive = overlap > 0.05 s (80, 10 per recording); the 48 segments of unlabelled calls stay label 0, not dropped; other groups' and label-0 rows ignored; recordings not in the caches dropped |
+| Segment rows | every segment of every recording holding a positive (384); positive = overlap > 0.05 s (80, 10 per recording); the 48 segments of unlabelled calls stay label 0, not dropped; other groups' rows and label-0 rows of uncached recordings ignored; recordings not in the caches dropped; no negatives → the negative column all 0 |
+| `no` answers (added 2026-11-19) | a `no` span's segment → negative, label 0; a `no` over a labelled call → those segments stay positive (1 negative in R0, not 3); a recording with negatives only gives its negative segments only (10.5–13 s → 10, 12.5); another group's `no` ignored (rows 384 + 2); `negatives=False` → the same rows and features as positives only; support counts negatives apart from unlabelled, recordings = those holding a positive (80 / 303 / 3, 8, negatives in 2); `cap_rows` keeps negatives whole and outside the cap, and draws as before when none is marked |
+| Hard negatives (simulated) | in each of the 8 recordings, the 3 call-free segments with the highest zero-shot score answered `no`. All 24 are in training (264 rows = 240 + 24) and held out; P vs N = AUROC on those rows; P vs N 0.499 → 0.922 [+0.355, +0.505]; `no` segments flagged at the cut: head 0.21, zero-shot 0.00 at 0.94; P vs rest 0.774 → 0.885, adopted. Without negatives P vs N is nan |
 | Features | embedding part unit length; last value = logit of the segment's own zero-shot score; `seg_max` excludes touching segments; a missing lane → rows dropped; `segment_features(t0, t1)` = exactly the segments `seg_max` takes the max over, equal to the whole-recording rows; segment embedding = normalised mean of the windows' normalised rows |
 | C choice | one of the 4, an AUROC per C; one recording → the smallest C |
 | Signal (3 of 8 calls unlabelled, cap 20) | adopted; AUROC P vs U 0.774 → 0.870 [+0.069, +0.136]; within recordings 0.771 → 0.921, head better in 8 / 8; cut 0.476 = `pu_cut` of the held-out rows: recall 0.94, flagged 0.39 (zero-shot at 0.94: 0.07, 0.02); every row scored once, held out; support 80 / 304 / 8; final head on the 240 capped rows |
@@ -2365,9 +2415,9 @@ call time covered, and the zero-shot score is weak. Then the CLI and the real ca
 | No signal | kept; 0.791 → 0.745 [−0.076, −0.002]; parameters still written |
 | Too few / one class | 3 recordings → "recordings 3 < 5"; a high positive minimum → "pos 80 < 10000"; positives only → "labels hold one class only"; no parameters |
 | The app's loader | adopted groups only; lane and the fitted cut, 0.5 when the spec has none; `prob` = the fitted pipeline's `predict_proba`; one probability per 2.5 s segment; a span's probability = the highest over the segments it overlaps (3 spans); a span over no segment → nan; missing files or adopted without parameters → nothing adopted |
-| CLI | `--audit` gone, `--cap` and `--groups` present; real log, `--groups Mammalia` into a scratch `--out` (6 s): spec holds only Mammalia, kept "too few labels: pos 22 < 30, recordings 1 < 5", PU labels and cap recorded; empty npz, header-only eval and segments; review log untouched |
+| CLI | `--audit` gone, `--cap`, `--groups` and `--positives-only` present; real log, `--groups Mammalia` into a scratch `--out` (11 s): spec holds only Mammalia, kept "too few labels: pos 22 < 30, recordings 1 < 5", labels with negatives and cap recorded; 5,316 positive and 22 `no` taxon labels, Mammalia 22 positive / 8 negative segments, negatives in 2 recordings, recordings (with a positive) 1; `--positives-only`: 0 negatives, PU labels, same 22 positives; empty npz, header-only eval and segments; review log untouched |
 | Real caches | 134 recordings, 1536-d, windows in order; one 1,537-value finite row per segment; `segment_features(10, 14)` max = `seg_max`; segment embedding = normalised mean of the normalised windows |
-| Total | 74 checks, all pass. The positive-vs-negative version had 49 (rerun 2026-11-17: 49 / 49). The first PU run had a call signal too weak once 3 of 8 calls were hidden and training was capped at 10 (0.774 → 0.789, not adopted); a sweep over seeds 1, 3, 5 set signal strength 5 and cap 20, adopted on all three (low end ≥ +0.06) |
+| Total | 90 checks, all pass (2026-11-19, with the `no` answers). Before: 74 for positive vs unlabelled; the positive-vs-negative version had 49 (rerun 2026-11-17: 49 / 49). The first PU run had a call signal too weak once 3 of 8 calls were hidden and training was capped at 10 (0.774 → 0.789, not adopted); a sweep over seeds 1, 3, 5 set signal strength 5 and cap 20, adopted on all three (low end ≥ +0.06) |
 
 **The app with adopted learners** (`test_review_app_learners.py`; hand-built learners: an Aves
 species prototype from a real box's embedding, and an Aves taxon head p = sigmoid(logit(zero-shot)
