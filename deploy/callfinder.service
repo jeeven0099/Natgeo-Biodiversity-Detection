@@ -1,0 +1,22 @@
+# systemd unit for the website's app: /etc/systemd/system/callfinder.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now callfinder
+# Assumes the repo is checked out at /srv/natgeo with its venv in .venv-perch, run by the user
+# 'natgeo' (change the three paths and User= to match the server). Caddy (deploy/Caddyfile) is the
+# way in: the app listens on 127.0.0.1 only.
+[Unit]
+Description=Call Finder (review_app.py --public)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=natgeo
+WorkingDirectory=/srv/natgeo
+ExecStart=/srv/natgeo/.venv-perch/bin/python -X utf8 scripts/review_app.py --public --device cpu --no-browser --port 8765
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

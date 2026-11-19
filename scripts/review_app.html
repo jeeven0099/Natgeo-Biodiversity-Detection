@@ -93,7 +93,7 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
   <span class="inl" title="download this recording's reviewed boxes as a Raven selection table (.txt), from the log as it is now">
     <button id="exportRaven">export Raven table</button>
     <select id="exportKeep"><option value="yes">yes only</option><option value="all">every answer</option></select></span>
-  <a id="editorLink" href="/editor" target="_blank" rel="noopener" title="open, record and cut audio files of your own; nothing there is logged">audio editor ↗</a>
+  <a id="editorLink" href="editor" target="_blank" rel="noopener" title="open, record and cut audio files of your own; nothing there is logged">audio editor ↗</a>
 </header>
 <main>
   <div class="card" id="list"></div>
@@ -243,10 +243,13 @@ let MIN = 0;                    // minute view: the minute shown, 0-based
 
 // ---------------- setup ----------------
 async function init() {
-  META = await api("/api/meta");
+  META = await api("api/meta");
   loadDisplay();
   $("kappa").value = store.get("kappa", META.kappa);
   $("reviewer").value = store.get("reviewer", "");
+  if (META.reviewer) {            // the website: the login names the reviewer; the field only shows it
+    $("reviewer").value = META.reviewer; $("reviewer").readOnly = true; $("reviewer").title = "signed in as " + META.reviewer;
+  }
   $("minuteMode").checked = store.get("minuteMode", "1") === "1";
   const on =JSON.parse(store.get("lanes", "null") || "null") || META.default_on;
   $("lanes").innerHTML = META.lanes.map(g =>
@@ -264,6 +267,10 @@ async function init() {
   if (want != null) history.replaceState(null, "", location.pathname);
   const wanted = want && META.recordings.some(r => r.id === want);
   if (want && !wanted) $("addstat").innerHTML = `<span class="err">${esc(want)} is not in the list (yet)</span>`;
+  if (!META.recordings.length) {  // nothing to review yet (the website before any upload is scanned)
+    if (!want) $("addstat").textContent = "no recordings yet: add audio, or wait for uploads to be scanned";
+    logStat(); resumeScans(); return;
+  }
   $("rec").value = wanted ? want : store.get("rec", META.recordings[0].id);
   if (!$("rec").value) $("rec").value = META.recordings[0].id;
   logStat();
@@ -357,7 +364,7 @@ async function loadRec(startId, minute) {
   store.set("rec", $("rec").value);
   let all;
   recWait++;
-  try { all = await api(`/api/boxes?rec=${encodeURIComponent($("rec").value)}&kappa=${$("kappa").value}`); }
+  try { all = await api(`api/boxes?rec=${encodeURIComponent($("rec").value)}&kappa=${$("kappa").value}`); }
   finally { recWait--; }
   if (seq !== recSeq) return;
   ALL = all;
@@ -407,7 +414,7 @@ function scheduleRefine() {
 async function refreshRefine() {
   const rec = $("rec").value, kap = $("kappa").value;
   let fresh;
-  try { fresh = await api(`/api/boxes?rec=${encodeURIComponent(rec)}&kappa=${kap}`); } catch { return scheduleRefine(); }
+  try { fresh = await api(`api/boxes?rec=${encodeURIComponent(rec)}&kappa=${kap}`); } catch { return scheduleRefine(); }
   if (rec !== $("rec").value || kap !== $("kappa").value) return;
   const by = new Map(fresh.map(b => [b.id, b]));
   ALL.forEach(b => { const f = by.get(b.id); if (f) Object.assign(b, {uncertain: f.uncertain, refine_conf: f.refine_conf, refine_pending: f.refine_pending}); });
@@ -422,7 +429,8 @@ function tagOf(b) {
           reviewer: `<span class="tag">your box</span>`, audit: `<span class="tag">audit ${fmt(b.end_s - b.begin_s, 0)} s</span>`,
           taxon: `<span class="tag" title="the taxon head finds this group here; no model box covers it">taxon head ${esc(b.label)}</span>`}[b.source] || "")
     + (b.uncertain ? ` <span class="tag" title="refiner confidence ${fmt(b.refine_conf, 2)}">box uncertain</span>` : "")
-    + (b.taxon_doubt ? ` <span class="tag" title="the taxon head doubts this group here (p=${fmt(b.taxon_p, 2)})">taxon doubt</span>` : "");
+    + (b.taxon_doubt ? ` <span class="tag" title="the taxon head doubts this group here (p=${fmt(b.taxon_p, 2)})">taxon doubt</span>` : "")
+    + (b.flagged ? ` <span class="tag" title="a visitor pressed 'this looks wrong' (${b.flagged}×): a hint, not an answer">flagged by a visitor</span>` : "");
 }
 function renderList() {
   const mark = {yes: "✓", no: "✗", unknown: "?"};
@@ -497,7 +505,7 @@ async function select(i) {
   cur = i; PARENT = null; renderList();
   store.set("boxid", BOXES[i].id);
   const kap = $("kappa").value, seq = ++selSeq;
-  const box = await api(`/api/box?id=${encodeURIComponent(BOXES[i].id)}&kappa=${kap}`);
+  const box = await api(`api/box?id=${encodeURIComponent(BOXES[i].id)}&kappa=${kap}`);
   if (seq !== selSeq) return;            // a later pick (] pressed again, another click) wins
   BOX = box;
   fmaxPng = BOX.fmax_khz;
@@ -564,7 +572,7 @@ async function closeAudit(status) {
   if (!isAudit()) return;
   const groups = [...$("auditgroups").querySelectorAll("input:checked")].map(x => x.value);
   try {
-    const row = await api("/api/audit", {method: "POST", headers: {"Content-Type": "application/json"},
+    const row = await api("api/audit", {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({id: BOX.id, kappa: +$("kappa").value, reviewer: $("reviewer").value, status, groups,
                             comment: $("auditcomment").value})});
     const it = BOXES[cur];
@@ -644,8 +652,8 @@ async function loadSpec() {
   const want = specKey = specKeyNow();
   const im = new Image();
   im.onload = () => { if (want === specKeyNow()) { img = im; imgView = [a, b]; colourise(); dispNote(); draw(); } };
-  im.src = `/api/spec.png?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}&n=${n}`;
-  try { RAVEN = await api(`/api/raven?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}`); } catch { RAVEN = []; }
+  im.src = `api/spec.png?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}&n=${n}`;
+  try { RAVEN = await api(`api/raven?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}`); } catch { RAVEN = []; }
   draw();
 }
 
@@ -725,7 +733,7 @@ async function predict() {
   const q = new URLSearchParams({id, kappa: $("kappa").value, t0: fmt(t0, 2), t1: fmt(t1, 2), lo: fmt(acc[2], 3), hi: fmt(acc[3], 3)});
   if (BOX.new) { q.set("rec", BOX.recording); q.set("lane", lane); } else if (BOX.lane_editable) q.set("lane", lane);
   try {
-    const p = await api(`/api/predict?${q}`);
+    const p = await api(`api/predict?${q}`);
     if (!BOX || BOX.id !== id || BOX.lane !== lane || seq !== predSeq) return;
     PRED = p; renderTop();
   } catch (e) { if (seq === predSeq) $("topwrap").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
@@ -782,7 +790,7 @@ $("addsp").addEventListener("input", () => {
   clearTimeout(sTimer);
   sTimer = setTimeout(async () => {
     const q = $("addsp").value.trim();
-    suggs = q ? await api(`/api/species?q=${encodeURIComponent(q)}`) : [];
+    suggs = q ? await api(`api/species?q=${encodeURIComponent(q)}`) : [];
     hi = -1; renderSugg();
   }, 120);
 });
@@ -848,7 +856,7 @@ async function accept() {
   if (needsLane()) body.lane = BOX.lane;
   if (BOX.new) { body.new = true; body.recording = BOX.recording; delete body.id; }
   try {
-    const row = await api("/api/log", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const row = await api("api/log", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
     META.n_logged += 1; logStat();
     const r = META.recordings.find(r => r.id === BOX.recording);
     const said = `logged ${row.log_id} (${row.lane}, ${row.decision}${row.species ? ", " + row.species : ""})`;
@@ -1169,7 +1177,7 @@ async function loadRavenAll(rec) {
   if (RAVEN_ALL.rec === rec) return;
   RAVEN_ALL = {rec, boxes: []};
   const d = (META.recordings.find(r => r.id === rec) || {}).duration_s || 0;
-  try { const b = await api(`/api/raven?rec=${encodeURIComponent(rec)}&a=0&b=${d}`); if (RAVEN_ALL.rec === rec) RAVEN_ALL.boxes = b; }
+  try { const b = await api(`api/raven?rec=${encodeURIComponent(rec)}&a=0&b=${d}`); if (RAVEN_ALL.rec === rec) RAVEN_ALL.boxes = b; }
   catch { /* the strip just has no Raven boxes */ }
   drawOverview();
 }
@@ -1258,7 +1266,7 @@ ov.addEventListener("pointercancel", ovEnd);
 // export: this recording's selection table, as the server builds it from the log now
 $("exportRaven").onclick = () => {
   const a = document.createElement("a");
-  a.href = `/api/raven_table.txt?rec=${encodeURIComponent(viewRec())}&keep=${$("exportKeep").value}`;
+  a.href = `api/raven_table.txt?rec=${encodeURIComponent(viewRec())}&keep=${$("exportKeep").value}`;
   a.download = `${viewRec()}.Table.1.selections.txt`;
   document.body.appendChild(a); a.click(); a.remove();
 };
@@ -1286,7 +1294,7 @@ function playRange(t0, t1, pad, mode, what) {
   if (!acc) return;
   const q = new URLSearchParams({id: BOX.id, kappa: $("kappa").value, t0, t1, lo: acc[2], hi: acc[3], pad, mode});
   if (BOX.new) { q.set("rec", BOX.recording); if (BOX.lane) q.set("lane", BOX.lane); }
-  au.src = `/api/audio.wav?${q}`; applySpeed(); playing = "box";
+  au.src = `api/audio.wav?${q}`; applySpeed(); playing = "box";
   const end = Math.min(t1 + pad, clipStart + 30), band = `${fmt(acc[2])}–${fmt(acc[3])} kHz`;
   $("playnote").textContent = `${what}: ${fmt(clipStart)}–${fmt(end)} s, ` +
     (mode === "band-passed" ? band : mode === "cell mask" ? (BOX.tightened ? `kept cells within ${band}` : `${band} (no cell map)`) : "all frequencies") +
@@ -1304,7 +1312,7 @@ function playView() {
   const t0 = cursorT() ?? view[0], t1 = Math.min(view[1], t0 + META.view_play_s);
   if (t1 - t0 < 0.05) return;
   clipStart = t0; playEnd = t1;
-  au.src = `/api/view.wav?rec=${encodeURIComponent(viewRec())}&a=${t0}&b=${t1}`; applySpeed(); playing = "view";
+  au.src = `api/view.wav?rec=${encodeURIComponent(viewRec())}&a=${t0}&b=${t1}`; applySpeed(); playing = "view";
   $("playnote").textContent = `view: ${secs(t0)}–${secs(t1)}, all frequencies` +
     (t1 < view[1] - 0.05 ? ` · ${META.view_play_s} s at a time` : "") + speedNote();
   au.play().catch(() => {});
@@ -1342,7 +1350,7 @@ au.addEventListener("error", () => { $("playnote").innerHTML = `<span class="err
 function upload(blob, name, onProgress) {
   return new Promise((ok, bad) => {
     const x = new XMLHttpRequest();
-    x.open("POST", `/api/upload?name=${encodeURIComponent(name)}`);
+    x.open("POST", `api/upload?name=${encodeURIComponent(name)}`);
     x.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
     x.onload = () => {
       let j;
@@ -1360,7 +1368,7 @@ const scanText = j => j.state === "queued" ? "queued for detection"
   : j.state === "done" ? `calls detected: ${nBoxes(j.counts)} model boxes` : `detection failed: ${j.error}`;
 async function waitScan(rec, show) {
   for (;;) {
-    const j = (await api("/api/scans")).find(x => x.rec === rec);
+    const j = (await api("api/scans")).find(x => x.rec === rec);
     if (!j) throw new Error(`the server has no scan of ${rec}`);
     show(j);
     if (j.state === "done") return j;
@@ -1369,16 +1377,18 @@ async function waitScan(rec, show) {
   }
 }
 async function refreshRecs() {
-  META = await api("/api/meta");
+  const wasEmpty = !$("rec").value;
+  META = await api("api/meta");
   fillRecs();
   logStat();
+  if (wasEmpty && META.recordings.length) { $("rec").value = META.recordings[0].id; await loadRec(""); }   // the first recording arrived
 }
 let addSeq = 0;
 async function addAudio(file) {
   const st = $("addstat"), seq = ++addSeq, from = [$("rec").value, curId()];
   const say = h => { if (seq === addSeq) st.innerHTML = h; };
   if (file.size > META.max_upload_mb * 2 ** 20) {
-    say(`<span class="err">${esc(file.name)} is over ${META.max_upload_mb} MB: add it with scan_audio.py</span>`);
+    say(`<span class="err">${esc(file.name)} is over ${META.max_upload_mb} MB: ${META.max_upload_min ? "cut it into parts" : "add it with scan_audio.py"}</span>`);
     return;
   }
   try {
@@ -1390,7 +1400,7 @@ async function addAudio(file) {
     if ($("rec").value === from[0] && curId() === from[1]) {
       $("rec").value = r.rec;
       await loadRec("");
-      say(`${pre}: ${esc(scanText((await api("/api/scans")).find(x => x.rec === r.rec)))}`);
+      say(`${pre}: ${esc(scanText((await api("api/scans")).find(x => x.rec === r.rec)))}`);
     } else {
       say(`${pre} is ready: <button id="openAdded">open it</button>`);
       $("openAdded").onclick = () => { $("rec").value = r.rec; loadRec(""); say(""); };
@@ -1400,7 +1410,7 @@ async function addAudio(file) {
 // scans still running when the page (re)loads: follow them, refresh the list when each is done
 async function resumeScans() {
   try {
-    for (const j of (await api("/api/scans")).filter(x => x.state === "queued" || x.state === "running")) {
+    for (const j of (await api("api/scans")).filter(x => x.state === "queued" || x.state === "running")) {
       const seq = addSeq, say = h => { if (seq === addSeq) $("addstat").innerHTML = h; };
       waitScan(j.rec, x => say(`${esc(j.rec)}: ${esc(scanText(x))}`))
         .then(refreshRecs).catch(e => say(`<span class="err">${esc(e.message)}</span>`));

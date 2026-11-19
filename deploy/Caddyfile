@@ -1,0 +1,42 @@
+# The website: Caddy (https://caddyserver.com, v2.8 or later) in front of
+#   python scripts/review_app.py --public            (listens on 127.0.0.1:8765 only)
+# Caddy gets the HTTPS certificate itself. Copy this file to /etc/caddy/Caddyfile and
+# replace example.org with the server's domain name (its DNS A record must point at the server).
+#
+# Reviewer logins live OUTSIDE the repo, in /etc/caddy/reviewers.caddy, one line per reviewer:
+#   <name> <hash>          the hash from:  caddy hash-password --plaintext '<their password>'
+# The name is what the review log records as the reviewer. After an edit: sudo systemctl reload caddy
+
+example.org {
+	# nobody but this file names the reviewer: drop any X-Reviewer a browser sends
+	request_header -X-Reviewer
+
+	# uploads: --max-upload-mb 700 (review_app.py refuses more; this stops it earlier)
+	request_body {
+		max_size 701MiB
+	}
+
+	# /review and /review/...: the review app, behind the login
+	@review path /review /review/*
+	handle @review {
+		route {
+			basic_auth {
+				import /etc/caddy/reviewers.caddy
+			}
+			request_header X-Reviewer {http.auth.user.id}
+			reverse_proxy 127.0.0.1:8765
+		}
+	}
+
+	# the rest: the public upload page (each visitor sees their own uploads only)
+	handle {
+		reverse_proxy 127.0.0.1:8765
+	}
+
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 20MiB
+			roll_keep 5
+		}
+	}
+}

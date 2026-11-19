@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import csv
 import datetime as dt
 import hashlib
 import json
@@ -56,12 +57,15 @@ REVIEW_DIR = ROOT / "data" / "review"
 MODEL = ROOT / "external" / "bacpipe_model_checkpoints" / "perch_v2" / "perch_v2_no_dft.onnx"
 HEAD = PDIR / cm.HEAD_NAME
 LIB = ROOT / "external" / "earthchirp_lib"
+ESC50_DIR = ROOT / "data" / "insecta_compare"    # EarthChirp's ESC-50 outgroup (earthchirp_windows.earthchirp)
 SCAN_VERSION = "1"
 HOP_S = EW.HOP_S                     # 2.5 s
 BATCH = 16                           # Perch windows per call on the GPU (zero rows pad the last: cuDNN)
 HEAD_BATCH = 4                       # windows per cell-head call (its similarity tensor is 15 MB a window)
 MAX_UPLOAD_BYTES = 1 << 30           # 1 GiB
 AUDIO_EXT = (".wav", ".flac", ".ogg", ".oga", ".mp3", ".aif", ".aiff", ".w64", ".rf64", ".caf")
+DELETED_FILE = "deleted.csv"         # uploads deleted by their owner: their answers stay out of learning
+DELETED_COLS = ["recording", "sha256", "deleted_at", "reason"]
 # --check limits
 MAX_PROB_DIFF, MAX_EC_DIFF = cm.MAX_PROB_DIFF, cm.MAX_EC_DIFF
 MAX_CELL_PROB_DIFF, MAX_CELL_EC_DIFF, MIN_EMB_COS = 0.01, 2e-3, 0.999
@@ -85,6 +89,15 @@ def load_signal(path: str) -> tuple[np.ndarray, int]:
 def windows_of(x: np.ndarray, k0: int, k1: int) -> np.ndarray:
     hop_n = int(round(HOP_S * z.PERCH_SR))
     return np.stack([x[k * hop_n:k * hop_n + z.WINDOW_N] for k in range(k0, k1)])
+
+
+def missing_files() -> list[Path]:
+    """The files a scan reads besides the audio (Perch, the cell head, EarthChirp's library and its
+    ESC-50 outgroup) that are not there. The review app turns adding off when any is missing, so an
+    upload is refused at once instead of failing after it was stored."""
+    need = [MODEL, HEAD, LIB / "global_reflib_protos.npy", LIB / "global_reflib_index.parquet",
+            ESC50_DIR / "esc50_emb.npy", ESC50_DIR / "esc50_meta.csv", ROOT / "config" / "perch_class_index.csv"]
+    return [p for p in need if not p.exists()]
 
 
 def open_session(model: Path, device: str):
@@ -294,15 +307,18 @@ class Uploads:
         return meta.get("version") == SCAN_VERSION and meta.get("sha256") == info["sha256"]
 
     def receive(self, read, length: int, filename: str, taken: set[str],
-                limit: int | None = MAX_UPLOAD_BYTES) -> tuple[str, dict, bool]:
+                limit: int | None = MAX_UPLOAD_BYTES, max_duration_s: float | None = None,
+                extra: dict | None = None, too_big: str = "add longer files with scan_audio.py"
+                ) -> tuple[str, dict, bool]:
         """Streams `length` bytes from read(n) into audio/; -> (rec, info, created). The same bytes
         added before -> that recording (created False). Names in `taken` (lower case) get -2, -3, ...
-        limit None: no size cap (the command line)."""
+        limit None: no size cap (the command line). max_duration_s: longer audio is refused and not
+        kept. extra: more fields for the new recording's audio/<rec>.json (the website's private key)."""
         if length <= 0:
             raise ValueError("the upload is empty")
         if limit is not None and length > limit:
-            raise ValueError(f"the file is {length / 2**20:.0f} MB; the limit is {limit / 2**20:.0f} MB "
-                             "(add longer files with scan_audio.py)")
+            raise ValueError(f"the file is {length / 2**20:.1f} MB; the limit is {limit / 2**20:g} MB "
+                             f"({too_big})")
         ext = Path(str(filename)).suffix.lower()
         ext = ext if ext in AUDIO_EXT else ".wav"
         self.audio.mkdir(parents=True, exist_ok=True)
@@ -334,9 +350,13 @@ class Uploads:
                                  "editor and press detect calls there (the browser decodes it)") from None
             if si.frames <= 0 or si.samplerate <= 0:
                 raise ValueError(f"{filename!r} holds no samples")
+            if max_duration_s is not None and si.duration > max_duration_s + 1e-6:
+                raise ValueError(f"{filename!r} is {si.duration / 60:.2f} min long; the limit is "
+                                 f"{max_duration_s / 60:g} min: cut it into parts")
             base = clean_name(filename)
             rec, k = base, 1
-            while rec.lower() in taken or rec.lower() in self.names():
+            gone = {r.lower() for r in self.deleted()}     # a deleted id is never reused: its log rows stay
+            while rec.lower() in taken or rec.lower() in self.names() or rec.lower() in gone:
                 k += 1
                 rec = f"{base}-{k}"
             dst = self.audio / f"{rec}{ext}"
@@ -347,12 +367,68 @@ class Uploads:
         info = {"rec": rec, "file": dst.name, "name": Path(str(filename).replace("\\", "/")).name, "sha256": sha,
                 "bytes": got, "added_at": dt.datetime.now().isoformat(timespec="seconds"),
                 "samplerate": si.samplerate, "channels": si.channels, "duration_s": float(si.duration),
-                "format": f"{si.format} {si.subtype}"}
+                "format": f"{si.format} {si.subtype}", **(extra or {})}
+        self._write_info(rec, info)
+        return rec, {**info, "path": str(dst)}, True
+
+    def _write_info(self, rec: str, info: dict) -> None:
         side = self.audio / f"{rec}.json"
         part = side.with_suffix(".json.partial")
-        part.write_text(json.dumps(info, indent=1), encoding="utf-8")
+        part.write_text(json.dumps({k: v for k, v in info.items() if k != "path"}, indent=1), encoding="utf-8")
         os.replace(part, side)
-        return rec, {**info, "path": str(dst)}, True
+
+    def update_info(self, rec: str, **fields) -> dict:
+        """Adds fields to a recording's audio/<rec>.json (an upload made before the website had no key)."""
+        info = {**json.loads((self.audio / f"{rec}.json").read_text(encoding="utf-8")), **fields}
+        self._write_info(rec, info)
+        return info
+
+    def bytes_used(self) -> int:
+        """Bytes under the uploads folder (audio, sidecars, scans, half-received files)."""
+        return sum(p.stat().st_size for p in self.root.rglob("*") if p.is_file()) if self.root.exists() else 0
+
+    def purge(self, rec: str, info: dict) -> tuple[list[str], list[str]]:
+        """Removes a recording's audio and scan files -> (removed, left): a file still open elsewhere
+        (Windows: the scan worker reading it) is left, for the caller to remove later."""
+        gone, left = [], []
+        for p in [self.audio / info.get("file", f"{rec}.missing"), self.scan_file(rec),
+                  self.scans / f"{rec}.partial.npz"]:
+            try:
+                if p.exists():
+                    p.unlink()
+                    gone.append(p.name)
+            except OSError:
+                left.append(p.name)
+        return gone, left
+
+    def delete(self, rec: str, reason: str = "") -> tuple[list[str], list[str]]:
+        """Removes a recording's sidecar (first, so a half-deleted recording is never listed), audio and
+        scan; appends rec, sha256 and the time to deleted.csv, which the learners read to leave the
+        recording's answers out. -> (file names removed, file names left open: see purge)."""
+        side = self.audio / f"{rec}.json"
+        info = json.loads(side.read_text(encoding="utf-8")) if side.exists() else {}
+        gone = []
+        if side.exists():
+            side.unlink()
+            gone.append(side.name)
+        more, left = self.purge(rec, info)
+        gone += more
+        log = self.root / DELETED_FILE
+        new = not log.exists()
+        with open(log, "a", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(DELETED_COLS)
+            w.writerow([rec, info.get("sha256", ""), dt.datetime.now().isoformat(timespec="seconds"), reason])
+        return gone, left
+
+    def deleted(self) -> set[str]:
+        """Recordings deleted from the uploads folder (deleted.csv)."""
+        p = self.root / DELETED_FILE
+        if not p.exists():
+            return set()
+        with open(p, encoding="utf-8", newline="") as f:
+            return {r["recording"] for r in csv.DictReader(f)}
 
 
 def dataset_names() -> set[str]:

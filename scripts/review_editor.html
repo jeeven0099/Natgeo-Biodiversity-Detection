@@ -59,7 +59,7 @@ details summary { cursor: pointer; color: var(--muted); }
   <button id="save" class="primary" disabled>save WAV</button>
   <button id="detect" disabled title="send this file to the review app: the zero-shot model detects calls on it and it joins the box review list (stored in data/uploads)">detect calls</button>
   <span class="small" id="detstat"></span>
-  <a href="/" class="small">back to box review</a>
+  <a href="./" class="small">back to box review</a>
 </header>
 <main>
   <div class="card">
@@ -679,7 +679,7 @@ let detecting = false, maxMb = null;
 function upload(blob, name, onProgress) {
   return new Promise((ok, bad) => {
     const x = new XMLHttpRequest();
-    x.open("POST", `/api/upload?name=${encodeURIComponent(name)}`);
+    x.open("POST", `api/upload?name=${encodeURIComponent(name)}`);
     x.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
     x.onload = () => {
       let j;
@@ -696,7 +696,7 @@ async function detect() {
   detecting = true; buttons();
   try {
     if (maxMb == null) {
-      const m = await (await fetch("/api/meta")).json();
+      const m = await (await fetch("api/meta")).json();
       if (!m.can_add) throw new Error("this review app cannot add audio (no embeddings or cell maps cache)");
       maxMb = m.max_upload_mb;
     }
@@ -716,12 +716,12 @@ async function detect() {
     }
     const pre = r.created ? esc(r.rec) : `already added as ${esc(r.rec)}`;
     for (;;) {
-      const j = (await (await fetch("/api/scans")).json()).find(x => x.rec === r.rec);
+      const j = (await (await fetch("api/scans")).json()).find(x => x.rec === r.rec);
       if (!j) throw new Error(`the server has no scan of ${r.rec}`);
       if (j.state === "error") throw new Error(`detection failed: ${j.error}`);
       if (j.state === "done") {
         const n = Object.values(j.counts || {}).reduce((s, x) => s + x, 0);
-        st(`${pre}: calls detected, ${n} model boxes (all groups) · <a id="openRev" href="/?rec=${encodeURIComponent(r.rec)}" target="_blank" rel="noopener">open in box review ↗</a>`);
+        st(`${pre}: calls detected, ${n} model boxes (all groups) · <a id="openRev" href="./?rec=${encodeURIComponent(r.rec)}" target="_blank" rel="noopener">open in box review ↗</a>`);
         break;
       }
       st(`${pre}: ${j.state === "queued" ? "queued for detection" : `detecting calls ${j.done}/${j.total} windows`}`);

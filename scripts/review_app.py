@@ -58,11 +58,21 @@ the list with its model / below-threshold / audit / taxon-check items like any o
 have no Raven boxes; their answers are logged as usual, but review_labels.py leaves them out of every
 learner (the learners are fitted and tested on the dataset's recordings only).
 
+Website (--public, behind the proxy in deploy/): anyone can upload audio at / (public_app.html) and see
+the model boxes, their top 5 and playback for their own uploads only. Each upload gets a private key;
+the link /u/<key> and an HttpOnly cookie hold it, and every public request is checked against the
+cookie's keys. Visitors cannot answer; they can flag a box ("this looks wrong": flags.csv, shown to
+reviewers, never a label) and delete their upload (files removed, deleted.csv; the learners skip it).
+The review app moves to /review/, which the proxy guards with a login; the reviewer name in the log
+is the login's (REVIEWER_HEADER), not the page's field. Limits: --max-upload-mb, --max-upload-min,
+--daily-uploads per address (counted in memory only), --disk-quota-gb, --min-free-gb. Without
+--public the app is the local review app as before.
+
 Reads segment_scores.csv, earthchirp_segments.csv, window_scores.csv, earthchirp_embeddings.npy,
 cell_maps.npy, the Raven tables, the wavs, external/earthchirp_lib, config/*.csv and
 data/review/calibration/. Writes only data/review/annotation_log.csv, box_shown.csv, species_shown.csv,
-audit_windows.csv and prediction_cache.jsonl (box embeddings for the species learner stay in memory),
-and added audio with its scans under data/uploads.
+audit_windows.csv, flags.csv and prediction_cache.jsonl (box embeddings for the species learner stay in
+memory), and added audio with its scans under data/uploads.
 """
 from __future__ import annotations
 
@@ -72,16 +82,19 @@ import datetime as dt
 import io
 import json
 import queue
+import secrets
+import shutil
 import sys
 import threading
 import traceback
 import uuid
 import webbrowser
 import zlib
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import numpy as np
 import pandas as pd
@@ -108,8 +121,9 @@ SHOWN_FILE = REVIEW_DIR / "box_shown.csv"
 SPECIES_SHOWN_FILE = REVIEW_DIR / "species_shown.csv"
 HTML_FILE = Path(__file__).resolve().parent / "review_app.html"
 COMMON_FILE = ROOT / "config" / "common_names.csv"
-APP_VERSION = "4"            # 2: queue sources, reviewer boxes, audit windows; 3: box refiner, box_shown.csv;
-                             # 4: species learner (species_shown.csv), taxon check source
+APP_VERSION = "5"            # 2: queue sources, reviewer boxes, audit windows; 3: box refiner, box_shown.csv;
+                             # 4: species learner (species_shown.csv), taxon check source;
+                             # 5: website (--public): reviewer name from the proxy's login, visitor flags
 TOP_K = 5
 CONTEXT_S = 2.0              # spectrogram shows the box +- this
 MIN_VIEW_S, MAX_VIEW_S = 10.0, 120.0
@@ -162,6 +176,21 @@ RAVEN_TABLE_COLS = ["Selection", "View", "Channel", "Begin Time (s)", "End Time 
 RAVEN_EXPORT = {"yes": ("yes",), "all": DECISIONS}   # which answers an export keeps
 EDITOR_FILE = Path(__file__).resolve().parent / "review_editor.html"
 UPLOADS_DIR = SA.UPLOADS_DIR                     # added audio and its scans (--uploads-dir)
+# ---- website (--public): anyone uploads and sees the calls found in their own files; only invited
+# reviewers (a login at the proxy, which passes their name in REVIEWER_HEADER under /review/) answer
+PUBLIC_FILE = Path(__file__).resolve().parent / "public_app.html"
+FLAGS_FILE = REVIEW_DIR / "flags.csv"            # visitors' "this looks wrong": a hint for reviewers, never a label
+FLAG_COLS = ["flag_id", "flagged_at", "box_id", "recording", "lane", "begin_s", "end_s", "comment", "app_version"]
+REVIEWER_HEADER = "X-Reviewer"                   # set by the proxy after its login; the proxy strips it elsewhere
+REVIEW_PREFIX = "/review"                        # the reviewer pages and API live under it in --public mode
+KEY_COOKIE = "uploads"                           # a visitor's private keys ('.'-joined), one per upload
+MAX_KEYS = 40                                    # keys a cookie keeps (the newest)
+COOKIE_AGE_S = 365 * 24 * 3600
+MAX_JSON_BYTES = 64 * 1024                       # a JSON POST body
+FLAGS_PER_DAY = 200                              # per address
+MAX_COMMENT = 500
+PUBLIC_MAX_VIEW_S = MAX_VIEW_S                   # a visitor's spectrogram / view audio: at most this long
+HEAVY_AT_ONCE = 3                                # --public: spectrograms, audio and top 5s computed at once
 
 
 def model_of(lane: str) -> str:
@@ -339,6 +368,10 @@ class Store:
         # added recordings' window rows go behind the caches' (scan_audio.RowStack), so every reader
         # indexing by win_rows keeps working; the cell maps the same way
         self.can_add = self.E is not None and self.cells is not None and len(self.cells.M) == len(w)
+        self.scan_missing = SA.missing_files() if self.can_add else []
+        if self.scan_missing:
+            print("adding audio is off: a scan needs " + ", ".join(rel(p) for p in self.scan_missing), flush=True)
+            self.can_add = False
         if self.can_add:
             self.E = SA.RowStack(self.E)
             self.cells.M = SA.RowStack(self.cells.M)
@@ -392,9 +425,17 @@ class Store:
         self._scan_q: queue.Queue = queue.Queue()
         self._add_lock = threading.Lock()          # registration (rows appended, dicts extended)
         self._upload_lock = threading.Lock()       # one upload names itself at a time
+        self._del_lock = threading.Lock()          # a delete and a finished scan's save + registration
         self._uploads_on = False
+        self.key_rec: dict[str, str] = {}          # private key -> added recording (the website's links)
+        self.rec_key: dict[str, str] = {}
 
     # ---- added audio (scan_audio.py) ------------------------------------------------------
+    def add_off_reason(self) -> str:
+        if self.scan_missing:
+            return "a scan needs " + ", ".join(rel(p) for p in self.scan_missing)
+        return "the app runs without earthchirp_embeddings.npy / a full cell_maps.npy"
+
     def start_uploads(self) -> None:
         if self._uploads_on:
             return
@@ -404,14 +445,14 @@ class Store:
         if not recs:
             return
         if not self.can_add:
-            print(f"{len(recs)} added recordings in {rel(UPLOADS_DIR)} not shown: the app runs without "
-                  "earthchirp_embeddings.npy / a full cell_maps.npy", flush=True)
+            print(f"{len(recs)} added recordings in {rel(UPLOADS_DIR)} not shown: {self.add_off_reason()}", flush=True)
             return
         n_scan = 0
         for rec, info in recs.items():
             if rec in self.wavs:
                 print(f"added recording {rec} has a dataset recording's name: skipped", flush=True)
                 continue
+            self._set_key(rec, info.get("key"))
             try:
                 if self.uploads.scan_ok(rec, info):
                     self._register(rec, info, SA.load_scan(self.uploads.scan_file(rec)))
@@ -442,17 +483,27 @@ class Store:
         while True:
             rec, info = self._scan_q.get()
             job = self.jobs[rec]
-            job["state"] = "running"
+            with self._add_lock:
+                if job["state"] == "deleted":          # deleted while queued
+                    continue
+                job["state"] = "running"
             try:
                 def progress(d, t, job=job):
                     job["done"], job["total"] = d, t
                 scan = self.scanner().scan(info["path"], progress)
-                SA.save_scan(self.uploads.scan_file(rec), scan, {"sha256": info["sha256"], "rec": rec})
-                self._register(rec, info, scan)
+                with self._del_lock:
+                    if job["state"] == "deleted":      # deleted while scanning: files the delete could not
+                        self.uploads.purge(rec, info)   # remove (open on Windows) go now; nothing is saved
+                        continue
+                    SA.save_scan(self.uploads.scan_file(rec), scan, {"sha256": info["sha256"], "rec": rec})
+                    self._register(rec, info, scan)
                 job.update(state="done", counts=self.box_counts[rec], seconds=scan["meta"]["seconds"])
                 print(f"scanned {rec}: {len(scan['start_s'])} windows in {scan['meta']['seconds']} s, model boxes "
                       f"{sum(self.box_counts[rec].values())}", flush=True)
             except Exception as e:
+                if job["state"] == "deleted":          # the file went away under the scan
+                    self.uploads.purge(rec, info)
+                    continue
                 traceback.print_exc()
                 job.update(state="error", error=f"{type(e).__name__}: {e}")
 
@@ -463,7 +514,7 @@ class Store:
         seg = SA.segments(scan, rec)
         counts = {g: int(c) for g, c in pv.perch_boxes(seg, self.thresholds)["group"].value_counts().items()}
         with self._add_lock:
-            if rec in self.added:
+            if rec in self.added or self.jobs.get(rec, {}).get("state") == "deleted":
                 return
             a = len(self.win_starts)
             if len(self.E) != a or len(self.cells.M) != a:
@@ -487,19 +538,93 @@ class Store:
         the review folder's logs or prediction cache name."""
         return {r.lower() for r in self.wavs} | SA.logged_names(REVIEW_DIR)
 
-    def add_upload(self, read, length: int, name: str) -> dict:
-        """POST /api/upload: stores the file, queues its scan; -> {rec, created, job}."""
+    def _set_key(self, rec: str, key: str | None) -> None:
+        if key:
+            with self._add_lock:
+                self.key_rec[key], self.rec_key[rec] = rec, key
+
+    def add_upload(self, read, length: int, name: str, limit: int | None = SA.MAX_UPLOAD_BYTES,
+                   max_duration_s: float | None = None, via: str = "local",
+                   too_big: str = "add longer files with scan_audio.py") -> dict:
+        """POST /api/upload: stores the file, queues its scan; -> {rec, created, key, job}. Every new
+        upload gets a private key (the website's link to it); the same bytes again give the key of the
+        recording they already are (made now if that recording has none)."""
         if not (self.can_add and self._uploads_on):
-            raise ValueError("adding audio needs earthchirp_embeddings.npy and a full cell_maps.npy")
+            raise ValueError(f"adding audio is off on this server: {self.add_off_reason()}")
         with self._upload_lock:
-            rec, info, created = self.uploads.receive(read, length, name, self.taken_names())
+            rec, info, created = self.uploads.receive(
+                read, length, name, self.taken_names(), limit=limit, max_duration_s=max_duration_s,
+                extra={"key": secrets.token_urlsafe(18), "via": via}, too_big=too_big)
+            if not info.get("key"):
+                info = {**info, **self.uploads.update_info(rec, key=secrets.token_urlsafe(18))}
+            self._set_key(rec, info["key"])
             job = self.jobs.get(rec)
             if rec in self.added:
                 job = job or {"rec": rec, "name": info["name"], "state": "done", "done": 1, "total": 1,
                               "error": "", "counts": self.box_counts[rec]}
             elif job is None or job["state"] == "error":
                 job = self._queue(rec, info)
-        return {"rec": rec, "created": created, "job": dict(job)}
+        return {"rec": rec, "created": created, "key": info["key"], "job": dict(job)}
+
+    def queue_position(self, rec: str) -> int | None:
+        """1 + the scans queued or running ahead of a recording's (None when it is not waiting)."""
+        ahead = 0
+        for r, j in list(self.jobs.items()):         # insertion order = the queue's order
+            if r == rec:
+                return ahead + 1 if j["state"] in ("queued", "running") else None
+            ahead += j["state"] in ("queued", "running")
+        return None
+
+    def delete_upload(self, rec: str) -> dict:
+        """An added recording's owner deletes it: files removed (scan_audio.Uploads.delete, logged in
+        deleted.csv), every table forgets it; a queued or running scan is dropped. Its window rows stay
+        behind the caches' (unreachable) until the next start. Log rows naming it stay (append-only);
+        the learners leave out recordings in deleted.csv."""
+        with self._del_lock:
+            with self._add_lock:
+                if rec not in self.added and rec not in self.jobs:
+                    raise KeyError(rec)
+                if rec in self.jobs:
+                    self.jobs[rec]["state"] = "deleted"
+                for d in (self.added, self.wavs, self.box_counts, self.seg_by_rec, self.win_rows,
+                          self.embedder.starts, self._rec_info, self.twin._rec):
+                    d.pop(rec, None)
+                if self.cells is not None:
+                    self.cells.rows.pop(rec, None)
+                if rec in self.recs:
+                    self.recs.remove(rec)
+                key = self.rec_key.pop(rec, None)
+                self.key_rec.pop(key, None)
+            with self._lock:
+                self._boxes = {k: v for k, v in self._boxes.items() if k[0] != rec}
+                self._pred = {k: v for k, v in self._pred.items() if k.split("|")[0] != rec}
+                self._ref = {k: v for k, v in self._ref.items() if k[0].split("|")[0] != rec}
+            gone, left = self.uploads.delete(rec, "owner")
+        return {"rec": rec, "deleted": True, "removed": gone, "left": left}
+
+    # ---- visitor flags (--public) ----------------------------------------------------------
+    def append_flag(self, body: dict) -> dict:
+        """A visitor's "this looks wrong" on a model box: one row in FLAGS_FILE. Reviewers see the count;
+        no learner reads it."""
+        d = self.box(str(body.get("id", "")), float(body.get("kappa", pv.KAPPA)))
+        row = {"flag_id": uuid.uuid4().hex[:12], "flagged_at": dt.datetime.now().isoformat(timespec="seconds"),
+               "box_id": d["id"], "recording": d["recording"], "lane": d["lane"], "begin_s": d["begin_s"],
+               "end_s": d["end_s"], "comment": " ".join(str(body.get("comment", "")).split())[:MAX_COMMENT],
+               "app_version": APP_VERSION}
+        with self._log_lock:
+            new = not FLAGS_FILE.exists()
+            with FLAGS_FILE.open("a", encoding="utf-8", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=FLAG_COLS)
+                if new:
+                    w.writeheader()
+                w.writerow(row)
+        return {"flag_id": row["flag_id"], "id": d["id"]}
+
+    def flag_counts(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for r in read_rows(FLAGS_FILE):
+            out[r["box_id"]] = out.get(r["box_id"], 0) + 1
+        return out
 
     # ---- queue items (boxes of every source, and audit windows) ---------------------------
     def items(self, rec: str, kappa: float) -> list[dict]:
@@ -1159,8 +1284,59 @@ def rel(p: Path) -> str:
     return str(p.relative_to(ROOT) if p.is_relative_to(ROOT) else p)
 
 
+class HTTPError(Exception):
+    """An answer with this status and message (403 not a reviewer, 404 not yours, 429 daily limit, ...)."""
+
+    def __init__(self, code: int, msg: str):
+        super().__init__(msg)
+        self.code = code
+
+
+class Redirect(Exception):
+    def __init__(self, location: str):
+        super().__init__(location)
+        self.location = location
+
+
+class Site:
+    """--public: the website's limits, and per-address daily counts kept in memory only (no address is
+    written to disk; a restart clears them)."""
+
+    def __init__(self, max_upload_mb: float = 700, max_upload_min: float = 60, daily_uploads: int = 10,
+                 disk_quota_gb: float = 50, min_free_gb: float = 2):
+        self.max_bytes = int(max_upload_mb * 2**20)
+        self.max_duration_s = float(max_upload_min * 60)
+        self.daily_uploads = int(daily_uploads)
+        self.quota = int(disk_quota_gb * 2**30)
+        self.min_free = int(min_free_gb * 2**30)
+        self._n: dict[tuple[str, str, str], int] = {}
+        self._lock = threading.Lock()
+
+    def count(self, kind: str, addr: str) -> int:
+        with self._lock:
+            return self._n.get((dt.date.today().isoformat(), kind, addr), 0)
+
+    def add(self, kind: str, addr: str) -> None:
+        day = dt.date.today().isoformat()
+        with self._lock:
+            self._n = {k: v for k, v in self._n.items() if k[0] == day}     # yesterday's counts go
+            self._n[(day, kind, addr)] = self._n.get((day, kind, addr), 0) + 1
+
+    def room(self, uploads: SA.Uploads, length: int) -> None:
+        """Refuses an upload that would take the uploads folder past the quota or the disk below min_free."""
+        if uploads.bytes_used() + length > self.quota:
+            raise HTTPError(507, "the site's storage for uploads is full: please try again later")
+        p = uploads.root
+        while not p.exists():
+            p = p.parent
+        if shutil.disk_usage(p).free - length < self.min_free:
+            raise HTTPError(507, "the server's disk is nearly full: please try again later")
+
+
 class Handler(BaseHTTPRequestHandler):
     store: Store = None
+    site: Site | None = None                     # None: the local app (no login, no limits, no public side)
+    heavy = threading.BoundedSemaphore(HEAVY_AT_ONCE)
 
     def log_message(self, fmt, *args):          # quiet
         pass
@@ -1170,149 +1346,373 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")       # private links never leak in a Referer
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
-    def json(self, obj, code: int = 200):
-        self.send(code, json.dumps(obj).encode("utf-8"), "application/json")
+    def json(self, obj, code: int = 200, headers: dict | None = None):
+        self.send(code, json.dumps(obj).encode("utf-8"), "application/json", headers)
 
     def do_GET(self):
-        u = urlparse(self.path)
-        q = {k: v[0] for k, v in parse_qs(u.query).items()}
-        S = self.store
         try:
-            if u.path == "/":
-                self.send(200, HTML_FILE.read_bytes(), "text/html; charset=utf-8")
-            elif u.path == "/editor":
-                self.send(200, EDITOR_FILE.read_bytes(), "text/html; charset=utf-8")
-            elif u.path == "/api/raven_table.txt":
-                rec = q.get("rec", "")
-                if rec not in S.wavs:
-                    raise ValueError(f"unknown recording {rec!r}")
-                txt, n = raven_table(S.log_rows(), rec, q.get("keep", "yes"))
-                self.send(200, txt.encode("utf-8"), "text/plain; charset=utf-8",
-                          {"Content-Disposition": f'attachment; filename="{raven_file(rec)}"',
-                           "X-Selections": str(n)})
-            elif u.path == "/api/meta":
-                latest = S.latest()
-                done = {}
-                for bid, r in latest.items():
-                    done[r["recording"]] = done.get(r["recording"], 0) + 1
-                self.json({"recordings": [{"id": r, "counts": S.box_counts[r], "reviewed": done.get(r, 0),
-                                           "added": S.added.get(r), **S.rec_info(r)} for r in list(S.recs)],
-                           "can_add": S.can_add and S._uploads_on, "uploads_dir": rel(UPLOADS_DIR),
-                           "max_upload_mb": SA.MAX_UPLOAD_BYTES // 2**20,
-                           "minute_s": MINUTE_S, "spec_windows": list(SPEC_WINDOWS),
-                           "spec_range_db": SPEC_RANGE_DB, "view_play_s": VIEW_PLAY_S,
-                           "lanes": S.lanes, "default_on": S.default_on,
-                           "thresholds": S.thresholds, "near_low": S.near_low, "colors": pv.COLORS, "kappa": pv.KAPPA,
-                           "has_cells": S.cells is not None, "row_edges_khz": pv.ROW_EDGES_KHZ,
-                           "sources": {k: v for k, v in SOURCES.items()
-                                       if (k != "uncertain" or S.refiner is not None)
-                                       and (k != "taxon" or S.taxon_head.adopted())},
-                           "learners": {
-                               "species": {"version": S.species.version, "adopted": S.species.adopted,
-                                           "groups": S.species.groups(), "tau": S.species.spec.get("tau"),
-                                           "n_prototypes": len(S.species.meta)},
-                               "taxon": {"version": S.taxon_head.version, "adopted": S.taxon_head.adopted(),
-                                         "cut": {g: S.taxon_head.cut(g) for g in S.taxon_head.adopted()}}},
-                           "default_sources": list(DEFAULT_SOURCES),
-                           "refiner": None if S.refiner is None else {
-                               "version": S.refiner.version, "adopted": S.refiner.adopted(),
-                               "uncertain_below": {g: (s.get("conf_min") if s.get("conf_min") is not None
-                                                       else BR.UNCERTAIN_BELOW) for g, s in S.refiner.groups.items()},
-                               "default_uncertain_below": BR.UNCERTAIN_BELOW},
-                           "audit_groups": list(AUDIT_GROUPS), "audit_s": AUDIT_S,
-                           "log_file": rel(LOG_FILE), "audit_file": rel(AUDIT_FILE),
-                           "n_logged": len(S.log_rows()),
-                           "n_audit_complete": sum(r["status"] == "complete" for r in S.audit_latest().values())})
-            elif u.path == "/api/boxes":
-                latest, alatest = S.latest(), S.audit_latest()
-                out = []
-                for d in S.items(q["rec"], float(q.get("kappa", pv.KAPPA))):
-                    r = latest.get(d["id"]) if d["source"] != "audit" else None
-                    a = alatest.get(d["id"]) if d["source"] == "audit" else None
-                    ref = S.refinement(d, compute=False)
-                    pending = S.refiner is not None and d["source"] in REFINED_SOURCES and ref is None
-                    out.append({"uncertain": bool(ref and ref["uncertain"]),
-                                "refine_conf": ref["conf"] if ref else None, "refine_pending": pending,
-                                **{k: d[k] for k in ("id", "n", "source", "model", "lane", "label", "begin_s", "end_s",
-                                                     "t_begin", "t_end", "lo_khz", "hi_khz", "max_score",
-                                                     "taxon_p", "taxon_doubt")},
-                                "lane": r["lane"] if r else d["lane"],
-                                "decision": r["decision"] if r else "", "species": r["species"] if r else "",
-                                "acc": [float(r[k]) for k in ("accepted_begin_s", "accepted_end_s", "accepted_lo_khz",
-                                                              "accepted_hi_khz")] if r else None,
-                                "status": a["status"] if a else "", "groups": a["groups"] if a else ""})
-                self.json(out)
-            elif u.path == "/api/box":
-                d = S.box(q["id"], float(q.get("kappa", pv.KAPPA)))
-                if d["source"] == "audit":
-                    hist = [x for x in S.audit_rows() if audit_id(
-                        x["recording"], float(x["window_begin_s"]), float(x["window_end_s"])) == d["id"]]
-                else:
-                    hist = [x for x in S.log_rows() if row_id(x) == d["id"]]
-                ref = S.refinement(d)
-                shown, shown_box, _ = S.shown_of(d, hist[-1] if hist and d["source"] != "audit" else None)
-                self.json({**public(d), "view": list(S.view(d)), "shown_box": shown, "start_box": shown_box,
-                           "refined": ref["refined"] if ref and shown == "refined" else None,
-                           "refine_conf": ref["conf"] if ref else None, "uncertain": bool(ref and ref["uncertain"]),
-                           "refinable": bool(ref and ref["refinable"]), "duration_s": S.duration(d["recording"]),
-                           "fmax_khz": sf.info(S.wavs[d["recording"]]).samplerate / 2000,
-                           "history": hist, "latest": hist[-1] if hist else None,
-                           "common": {n: S.common_of(n) for x in hist for n in x.get("species", "").split("; ") if n}})
-            elif u.path == "/api/raven":
-                self.json(S.raven_in(q["rec"], float(q["a"]), float(q["b"])))
-            elif u.path == "/api/predict":
-                d = S.lookup(q)
-                t0, t1 = float(q["t0"]), float(q["t1"])
-                res = S.with_common(S.predict(d, t0, t1))
-                lo, hi = (float(q["lo"]), float(q["hi"])) if "lo" in q and "hi" in q else (None, None)
-                self.json({**res, **S.learned(d, t0, t1, lo, hi)})
-            elif u.path == "/api/spec.png":
-                png, fmax = S.spectrogram_png(q["rec"], float(q["a"]), float(q["b"]), int(q.get("n", 1024)))
-                self.send(200, png, "image/png")
-            elif u.path == "/api/view.wav":
-                self.send(200, S.view_wav(q["rec"], float(q["a"]), float(q["b"])), "audio/wav")
-            elif u.path == "/api/audio.wav":
-                d = S.lookup(q)
-                wav = S.audio_wav(d, float(q["t0"]), float(q["t1"]), float(q["lo"]), float(q["hi"]),
-                                  float(q.get("pad", 0)), q.get("mode", "band-passed"))
-                self.send(200, wav, "audio/wav")
-            elif u.path == "/api/species":
-                self.json(S.search(q.get("q", "")))
-            elif u.path == "/api/scans":
-                self.json([dict(j) for j in list(S.jobs.values())])
-            else:
-                self.send(404, b"not found", "text/plain")
+            path, q, role = self.route()
+            (self.get_public if role == "public" else self.get_reviewer)(path, q)
         except (BrokenPipeError, ConnectionError):  # the page moved on (e.g. a newer spectrogram)
             pass
+        except Redirect as r:
+            self.send(301, b"", "text/plain", {"Location": r.location})
+        except HTTPError as e:
+            self.json({"error": str(e)}, e.code)
         except ValueError as e:                   # the page's input errors
-            self.json({"error": f"{type(e).__name__}: {e}"}, 400)
+            self.json({"error": self.input_error(e)}, 400)
         except Exception as e:                    # report to the page and the console, keep serving
             traceback.print_exc()
-            self.json({"error": f"{type(e).__name__}: {e}"}, 500)
+            self.json({"error": self.shown_error(e)}, 500)
+
+    def input_error(self, e: Exception) -> str:
+        """An input error's text: a visitor gets the message alone, the review app its type too."""
+        if self.site is not None and getattr(self, "role", "public") == "public":
+            return f"missing {e}" if isinstance(e, KeyError) else str(e)
+        return f"{type(e).__name__}: {e}"
+
+    def shown_error(self, e: Exception) -> str:
+        """A server error's text for the page; a visitor sees no detail (it can hold file paths)."""
+        return "server error" if getattr(self, "role", "public") == "public" and self.site is not None \
+            else f"{type(e).__name__}: {e}"
+
+    def get_reviewer(self, path: str, q: dict) -> None:
+        """The review app (the local app, or /review/ behind the login in --public mode)."""
+        S = self.store
+        if path == "/":
+            self.send(200, HTML_FILE.read_bytes(), "text/html; charset=utf-8")
+        elif path == "/editor":
+            self.send(200, EDITOR_FILE.read_bytes(), "text/html; charset=utf-8")
+        elif path == "/api/raven_table.txt":
+            rec = q.get("rec", "")
+            if rec not in S.wavs:
+                raise ValueError(f"unknown recording {rec!r}")
+            txt, n = raven_table(S.log_rows(), rec, q.get("keep", "yes"))
+            self.send(200, txt.encode("utf-8"), "text/plain; charset=utf-8",
+                      {"Content-Disposition": f'attachment; filename="{raven_file(rec)}"',
+                       "X-Selections": str(n)})
+        elif path == "/api/meta":
+            latest = S.latest()
+            done = {}
+            for bid, r in latest.items():
+                done[r["recording"]] = done.get(r["recording"], 0) + 1
+            self.json({"recordings": [{"id": r, "counts": S.box_counts[r], "reviewed": done.get(r, 0),
+                                       "added": S.added.get(r), **S.rec_info(r)} for r in list(S.recs)],
+                       "can_add": S.can_add and S._uploads_on, "uploads_dir": rel(UPLOADS_DIR),
+                       "max_upload_mb": (SA.MAX_UPLOAD_BYTES if self.site is None else self.site.max_bytes) // 2**20,
+                       "max_upload_min": None if self.site is None else self.site.max_duration_s / 60,
+                       "reviewer": self.reviewer() if self.site is not None else None,   # set by the login
+                       "public": False, "app_version": APP_VERSION,
+                       "minute_s": MINUTE_S, "spec_windows": list(SPEC_WINDOWS),
+                       "spec_range_db": SPEC_RANGE_DB, "view_play_s": VIEW_PLAY_S,
+                       "lanes": S.lanes, "default_on": S.default_on,
+                       "thresholds": S.thresholds, "near_low": S.near_low, "colors": pv.COLORS, "kappa": pv.KAPPA,
+                       "has_cells": S.cells is not None, "row_edges_khz": pv.ROW_EDGES_KHZ,
+                       "sources": {k: v for k, v in SOURCES.items()
+                                   if (k != "uncertain" or S.refiner is not None)
+                                   and (k != "taxon" or S.taxon_head.adopted())},
+                       "learners": {
+                           "species": {"version": S.species.version, "adopted": S.species.adopted,
+                                       "groups": S.species.groups(), "tau": S.species.spec.get("tau"),
+                                       "n_prototypes": len(S.species.meta)},
+                           "taxon": {"version": S.taxon_head.version, "adopted": S.taxon_head.adopted(),
+                                     "cut": {g: S.taxon_head.cut(g) for g in S.taxon_head.adopted()}}},
+                       "default_sources": list(DEFAULT_SOURCES),
+                       "refiner": None if S.refiner is None else {
+                           "version": S.refiner.version, "adopted": S.refiner.adopted(),
+                           "uncertain_below": {g: (s.get("conf_min") if s.get("conf_min") is not None
+                                                   else BR.UNCERTAIN_BELOW) for g, s in S.refiner.groups.items()},
+                           "default_uncertain_below": BR.UNCERTAIN_BELOW},
+                       "audit_groups": list(AUDIT_GROUPS), "audit_s": AUDIT_S,
+                       "log_file": rel(LOG_FILE), "audit_file": rel(AUDIT_FILE),
+                       "n_logged": len(S.log_rows()),
+                       "n_audit_complete": sum(r["status"] == "complete" for r in S.audit_latest().values())})
+        elif path == "/api/boxes":
+            latest, alatest, flags = S.latest(), S.audit_latest(), S.flag_counts()
+            out = []
+            for d in S.items(q["rec"], float(q.get("kappa", pv.KAPPA))):
+                r = latest.get(d["id"]) if d["source"] != "audit" else None
+                a = alatest.get(d["id"]) if d["source"] == "audit" else None
+                ref = S.refinement(d, compute=False)
+                pending = S.refiner is not None and d["source"] in REFINED_SOURCES and ref is None
+                out.append({"uncertain": bool(ref and ref["uncertain"]),
+                            "refine_conf": ref["conf"] if ref else None, "refine_pending": pending,
+                            **{k: d[k] for k in ("id", "n", "source", "model", "lane", "label", "begin_s", "end_s",
+                                                 "t_begin", "t_end", "lo_khz", "hi_khz", "max_score",
+                                                 "taxon_p", "taxon_doubt")},
+                            "lane": r["lane"] if r else d["lane"],
+                            "decision": r["decision"] if r else "", "species": r["species"] if r else "",
+                            "acc": [float(r[k]) for k in ("accepted_begin_s", "accepted_end_s", "accepted_lo_khz",
+                                                          "accepted_hi_khz")] if r else None,
+                            "status": a["status"] if a else "", "groups": a["groups"] if a else "",
+                            "flagged": flags.get(d["id"], 0)})
+            self.json(out)
+        elif path == "/api/box":
+            d = S.box(q["id"], float(q.get("kappa", pv.KAPPA)))
+            if d["source"] == "audit":
+                hist = [x for x in S.audit_rows() if audit_id(
+                    x["recording"], float(x["window_begin_s"]), float(x["window_end_s"])) == d["id"]]
+            else:
+                hist = [x for x in S.log_rows() if row_id(x) == d["id"]]
+            ref = S.refinement(d)
+            shown, shown_box, _ = S.shown_of(d, hist[-1] if hist and d["source"] != "audit" else None)
+            self.json({**public(d), "view": list(S.view(d)), "shown_box": shown, "start_box": shown_box,
+                       "refined": ref["refined"] if ref and shown == "refined" else None,
+                       "refine_conf": ref["conf"] if ref else None, "uncertain": bool(ref and ref["uncertain"]),
+                       "refinable": bool(ref and ref["refinable"]), "duration_s": S.duration(d["recording"]),
+                       "fmax_khz": sf.info(S.wavs[d["recording"]]).samplerate / 2000,
+                       "history": hist, "latest": hist[-1] if hist else None,
+                       "common": {n: S.common_of(n) for x in hist for n in x.get("species", "").split("; ") if n}})
+        elif path == "/api/raven":
+            self.json(S.raven_in(q["rec"], float(q["a"]), float(q["b"])))
+        elif path == "/api/predict":
+            d = S.lookup(q)
+            t0, t1 = float(q["t0"]), float(q["t1"])
+            res = S.with_common(S.predict(d, t0, t1))
+            lo, hi = (float(q["lo"]), float(q["hi"])) if "lo" in q and "hi" in q else (None, None)
+            self.json({**res, **S.learned(d, t0, t1, lo, hi)})
+        elif path == "/api/spec.png":
+            png, fmax = S.spectrogram_png(q["rec"], float(q["a"]), float(q["b"]), int(q.get("n", 1024)))
+            self.send(200, png, "image/png")
+        elif path == "/api/view.wav":
+            self.send(200, S.view_wav(q["rec"], float(q["a"]), float(q["b"])), "audio/wav")
+        elif path == "/api/audio.wav":
+            d = S.lookup(q)
+            wav = S.audio_wav(d, float(q["t0"]), float(q["t1"]), float(q["lo"]), float(q["hi"]),
+                              float(q.get("pad", 0)), q.get("mode", "band-passed"))
+            self.send(200, wav, "audio/wav")
+        elif path == "/api/species":
+            self.json(S.search(q.get("q", "")))
+        elif path == "/api/scans":
+            self.json([{**j, "position": S.queue_position(r)} for r, j in list(S.jobs.items())])
+        else:
+            self.send(404, b"not found", "text/plain")
+
+    # ---- the website's public side (--public, outside /review/) ----------------------------------
+    def get_public(self, path: str, q: dict) -> None:
+        """Anyone: upload, and see the model boxes and top 5 of their own uploads only (the private keys
+        in their cookie). No answers, no reviewer names, no other recording."""
+        S, site = self.store, self.site
+        if path == "/":
+            self.send(200, PUBLIC_FILE.read_bytes(), "text/html; charset=utf-8")
+        elif path == "/editor":
+            self.send(200, EDITOR_FILE.read_bytes(), "text/html; charset=utf-8")
+        elif path.startswith("/u/"):                  # a private link: remember its key, open the recording
+            key = path[3:]
+            rec = S.key_rec.get(key)
+            if rec is None:
+                self.send(404, b"This link names no upload (it may have been deleted).", "text/plain; charset=utf-8")
+                return
+            self.send(302, b"", "text/plain", {"Location": "/?rec=" + quote(rec),
+                                               "Set-Cookie": self.key_cookie(self.cookie_keys() + [key])})
+        elif path == "/api/meta":
+            recs = []
+            for r in self.owned():
+                a, key = S.added.get(r), S.rec_key.get(r)
+                if a is None or key is None or r not in S.box_counts:     # still scanning (see /api/scans)
+                    continue
+                recs.append({"id": r, "name": a["name"], "added_at": a["added_at"], "link": f"u/{key}",
+                             "counts": S.box_counts[r], **S.rec_info(r)})
+            left = site.daily_uploads - site.count("upload", self.addr())
+            self.json({"public": True, "app_version": APP_VERSION, "recordings": recs,
+                       "can_add": S.can_add and S._uploads_on, "max_upload_mb": site.max_bytes // 2**20,
+                       "max_upload_min": site.max_duration_s / 60, "daily_uploads": site.daily_uploads,
+                       "uploads_left_today": max(0, left), "minute_s": MINUTE_S, "max_view_s": PUBLIC_MAX_VIEW_S,
+                       "spec_windows": list(SPEC_WINDOWS), "spec_range_db": SPEC_RANGE_DB,
+                       "view_play_s": VIEW_PLAY_S, "lanes": S.lanes, "default_on": S.default_on,
+                       "groups": {g: lane_group(g) for g in S.lanes}, "models": {g: model_of(g) for g in S.lanes},
+                       "thresholds": S.thresholds, "colors": pv.COLORS, "kappa": pv.KAPPA,
+                       "has_cells": S.cells is not None, "row_edges_khz": pv.ROW_EDGES_KHZ})
+        elif path == "/api/boxes":
+            rec = self.own(q.get("rec", ""), scanned=True)
+            latest = S.latest()
+            out = []
+            for d in S.items(rec, float(q.get("kappa", pv.KAPPA))):
+                if d["source"] != "model":
+                    continue
+                r = latest.get(d["id"])
+                out.append({**{k: d[k] for k in ("id", "n", "model", "lane", "begin_s", "end_s", "t_begin",
+                                                 "t_end", "lo_khz", "hi_khz", "max_score", "threshold")},
+                            "group": lane_group(d["lane"]),
+                            "reviewed": r["decision"] if r else "",       # a reviewer's answer, no name
+                            "species": r["species"] if r and r["decision"] == "yes" else ""})
+            self.json(out)
+        elif path == "/api/box":
+            d = self.public_box(q)
+            self.json({**{k: v for k, v in public(d).items() if k not in ("taxon_p", "taxon_doubt")},
+                       "view": list(S.view(d)), **S.rec_info(d["recording"])})
+        elif path == "/api/predict":                  # the top 5 of the box as found (tightened), only
+            d = self.public_box(q)
+            with self.heavy:
+                res = S.with_common(S.predict(d, d["t_begin"], d["t_end"]))
+                learned = S.learned(d, d["t_begin"], d["t_end"], d["lo_khz"], d["hi_khz"])
+            self.json({**{k: v for k, v in res.items() if k != "check_max_diff"}, **learned})
+        elif path == "/api/spec.png":
+            rec = self.own(q.get("rec", ""), scanned=True)
+            a, b = float(q["a"]), float(q["b"])
+            if b - a > PUBLIC_MAX_VIEW_S + 1e-6:
+                raise ValueError(f"a spectrogram covers at most {PUBLIC_MAX_VIEW_S:.0f} s")
+            with self.heavy:
+                png, _ = S.spectrogram_png(rec, a, b, int(q.get("n", 1024)))
+            self.send(200, png, "image/png")
+        elif path == "/api/view.wav":
+            rec = self.own(q.get("rec", ""), scanned=True)
+            with self.heavy:
+                wav = S.view_wav(rec, float(q["a"]), float(q["b"]))
+            self.send(200, wav, "audio/wav")
+        elif path == "/api/audio.wav":
+            d = self.public_box(q)
+            mode = q.get("mode", "band-passed")
+            if mode not in ("band-passed", "cell mask", "original"):
+                raise ValueError("mode must be band-passed, cell mask or original")
+            with self.heavy:
+                wav = S.audio_wav(d, float(q["t0"]), float(q["t1"]), float(q["lo"]), float(q["hi"]),
+                                  min(2.0, max(0.0, float(q.get("pad", 0)))), mode)
+            self.send(200, wav, "audio/wav")
+        elif path == "/api/scans":
+            out = []
+            for r in self.owned():
+                j = S.jobs.get(r)
+                if j is not None:
+                    out.append({**{k: j.get(k) for k in ("rec", "name", "state", "done", "total", "counts",
+                                                         "seconds", "queued_at")},
+                                "error": "the scan failed: try again, or tell us" if j["state"] == "error" else "",
+                                "position": S.queue_position(r), "link": f"u/{S.rec_key[r]}" if r in S.rec_key else None})
+            self.json(out)
+        else:
+            self.send(404, b"not found", "text/plain")
+
+    # ---- identity and ownership ---------------------------------------------------------------
+    def route(self) -> tuple[str, dict, str]:
+        """-> (path, query, role). role 'reviewer': the local app (no --public), or /review/... with the
+        proxy's login (the prefix is stripped); 'public': the rest of the --public site."""
+        u = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        path = u.path
+        if path == REVIEW_PREFIX or path.startswith(REVIEW_PREFIX + "/"):
+            if path == REVIEW_PREFIX:                 # relative links need the trailing slash
+                raise Redirect(REVIEW_PREFIX + "/" + (f"?{u.query}" if u.query else ""))
+            if self.site is not None and not self.reviewer():
+                raise HTTPError(403, "reviewers sign in at /review/")
+            self.role = "reviewer"
+            return path[len(REVIEW_PREFIX):], q, self.role
+        self.role = "reviewer" if self.site is None else "public"
+        return path, q, self.role
+
+    def reviewer(self) -> str:
+        """The signed-in reviewer's name: set by the proxy after its login, never by the page."""
+        return " ".join(str(self.headers.get(REVIEWER_HEADER, "")).split())[:80]
+
+    def addr(self) -> str:
+        """The visitor's address for the daily counts (memory only): the proxy appends it to X-Forwarded-For."""
+        fwd = [x.strip() for x in str(self.headers.get("X-Forwarded-For", "")).split(",") if x.strip()]
+        return fwd[-1] if fwd else self.client_address[0]
+
+    def cookie_keys(self) -> list[str]:
+        try:
+            c = SimpleCookie(str(self.headers.get("Cookie", "")))
+        except CookieError:
+            return []
+        m = c.get(KEY_COOKIE)
+        return [k for k in (m.value.split(".") if m is not None else []) if k][-MAX_KEYS:]
+
+    def key_cookie(self, keys: list[str]) -> str:
+        """Set-Cookie for the keys that still name an upload (newest MAX_KEYS, no duplicates)."""
+        keys = [k for k in dict.fromkeys(keys) if k in self.store.key_rec][-MAX_KEYS:]
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "") == "https" else ""
+        age = COOKIE_AGE_S if keys else 0
+        return f"{KEY_COOKIE}={'.'.join(keys)}; Path=/; Max-Age={age}; HttpOnly; SameSite=Lax{secure}"
+
+    def owned(self) -> list[str]:
+        """The visitor's uploads: the recordings their cookie's keys name, oldest first."""
+        out = [self.store.key_rec.get(k) for k in self.cookie_keys()]
+        return list(dict.fromkeys(r for r in out if r is not None))
+
+    def own(self, rec: str, scanned: bool = False) -> str:
+        if rec not in self.owned() or (scanned and rec not in self.store.seg_by_rec):
+            raise HTTPError(404, "not found: open your upload's private link (or it is still being scanned)")
+        return rec
+
+    def public_box(self, q: dict) -> dict:
+        """A model box of the visitor's own upload (no other source, no box being drawn)."""
+        bid = str(q.get("id", ""))
+        rec = self.own(bid.split("|")[0], scanned=True)
+        try:
+            d = self.store.box(bid, float(q.get("kappa", pv.KAPPA)))
+        except KeyError:
+            raise HTTPError(404, "no such box") from None
+        if d["source"] != "model" or d["recording"] != rec:
+            raise HTTPError(404, "no such box")
+        return d
 
     def do_POST(self):
-        u = urlparse(self.path)
+        S, site = self.store, self.site
         try:
-            if u.path == "/api/upload":               # raw audio bytes, streamed to disk (not JSON)
-                name = parse_qs(u.query).get("name", ["added.wav"])[0]
-                self.json(self.store.add_upload(self.rfile.read, int(self.headers.get("Content-Length", 0)), name))
+            path, q, role = self.route()
+            if path == "/api/upload":                 # raw audio bytes, streamed to disk (not JSON)
+                self.upload(q.get("name", "added.wav"), role)
                 return
-            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-            if u.path == "/api/log":
-                self.json(self.store.append(body))
-            elif u.path == "/api/audit":
-                self.json(self.store.append_audit(body))
+            n = int(self.headers.get("Content-Length", 0))
+            if site is not None and n > MAX_JSON_BYTES:
+                raise HTTPError(413, "the request is too large")
+            body = json.loads(self.rfile.read(n) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("expected a JSON object")
+            if role == "reviewer" and path in ("/api/log", "/api/audit"):
+                if site is not None:                  # the login's name, whatever the page sent
+                    body["reviewer"] = self.reviewer()
+                self.json(S.append(body) if path == "/api/log" else S.append_audit(body))
+            elif role == "public" and path == "/api/flag":
+                addr = self.addr()
+                if site.count("flag", addr) >= FLAGS_PER_DAY:
+                    raise HTTPError(429, "too many reports today: thank you, try again tomorrow")
+                d = self.public_box({"id": body.get("id", ""), "kappa": body.get("kappa", pv.KAPPA)})
+                res = S.append_flag({**body, "id": d["id"]})
+                site.add("flag", addr)
+                self.json(res)
+            elif role == "public" and path == "/api/delete":
+                rec = self.own(str(body.get("rec", "")))
+                S.delete_upload(rec)
+                self.json({"rec": rec, "deleted": True}, headers={"Set-Cookie": self.key_cookie(self.cookie_keys())})
             else:
                 self.send(404, b"not found", "text/plain")
+        except Redirect as r:
+            self.send(301, b"", "text/plain", {"Location": r.location})
+        except HTTPError as e:
+            self.json({"error": str(e)}, e.code)
         except Exception as e:
             if not isinstance(e, (ValueError, KeyError)):   # those are the page's input errors
                 traceback.print_exc()
-            self.json({"error": f"{type(e).__name__}: {e}"}, 400)
+            self.json({"error": self.input_error(e) if isinstance(e, (ValueError, KeyError))
+                       else self.shown_error(e)}, 400)
+
+    def upload(self, name: str, role: str) -> None:
+        """POST /api/upload. --public: at most --max-upload-mb and --max-upload-min, inside the disk quota;
+        a visitor's address at most --daily-uploads new files a day (reviewers: no daily count). The
+        answer sets the cookie that remembers the upload's private key."""
+        S, site = self.store, self.site
+        length = int(self.headers.get("Content-Length", 0))
+        if site is None:
+            self.json(S.add_upload(self.rfile.read, length, name))
+            return
+        addr = self.addr()
+        if role == "public" and site.count("upload", addr) >= site.daily_uploads:
+            raise HTTPError(429, f"{site.daily_uploads} uploads a day per address: please try again tomorrow")
+        if 0 < length <= site.max_bytes:
+            site.room(S.uploads, length)
+        res = S.add_upload(self.rfile.read, length, name, limit=site.max_bytes, max_duration_s=site.max_duration_s,
+                           via="website" if role == "public" else "reviewer", too_big="cut it into parts")
+        if res["created"] and role == "public":
+            site.add("upload", addr)
+        res["link"] = f"u/{res['key']}"
+        self.json(res, headers={"Set-Cookie": self.key_cookie(self.cookie_keys() + [res["key"]])})
 
 
 class Server(ThreadingHTTPServer):
@@ -1333,7 +1733,7 @@ class Server(ThreadingHTTPServer):
 
 
 def main() -> None:
-    global REVIEW_DIR, LOG_FILE, CACHE_FILE, AUDIT_FILE, SHOWN_FILE, SPECIES_SHOWN_FILE, UPLOADS_DIR
+    global REVIEW_DIR, LOG_FILE, CACHE_FILE, AUDIT_FILE, SHOWN_FILE, SPECIES_SHOWN_FILE, UPLOADS_DIR, FLAGS_FILE
     sys.modules.setdefault("review_app", sys.modules[__name__])   # the learners import this module: one copy
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8765)
@@ -1352,11 +1752,20 @@ def main() -> None:
                     help="write a Raven selection table per reviewed recording into DIR and exit (no server)")
     ap.add_argument("--export-keep", choices=tuple(RAVEN_EXPORT), default="yes",
                     help="with --export-raven: 'yes' boxes only (default) or every answer, Decision column says which")
+    web = ap.add_argument_group("website (--public; run behind the proxy in deploy/, which signs reviewers in)")
+    web.add_argument("--public", action="store_true",
+                     help="/ is the public upload page (own uploads only, via private links); the review app moves "
+                          f"to {REVIEW_PREFIX}/ and needs the proxy's {REVIEWER_HEADER} header, which names the reviewer")
+    web.add_argument("--max-upload-mb", type=float, default=700)
+    web.add_argument("--max-upload-min", type=float, default=60, help="longest upload, minutes")
+    web.add_argument("--daily-uploads", type=int, default=10, help="new uploads per visitor address per day")
+    web.add_argument("--disk-quota-gb", type=float, default=50, help="the uploads folder's size at most")
+    web.add_argument("--min-free-gb", type=float, default=2, help="free disk an upload must leave")
     args = ap.parse_args()
     REVIEW_DIR = args.review_dir.resolve()
     LOG_FILE, CACHE_FILE = REVIEW_DIR / "annotation_log.csv", REVIEW_DIR / "prediction_cache.jsonl"
     AUDIT_FILE, SHOWN_FILE = REVIEW_DIR / "audit_windows.csv", REVIEW_DIR / "box_shown.csv"
-    SPECIES_SHOWN_FILE = REVIEW_DIR / "species_shown.csv"
+    SPECIES_SHOWN_FILE, FLAGS_FILE = REVIEW_DIR / "species_shown.csv", REVIEW_DIR / "flags.csv"
     UPLOADS_DIR = args.uploads_dir.resolve()
     if args.export_raven is not None:
         counts = export_raven(args.export_raven, args.export_keep)
@@ -1376,10 +1785,18 @@ def main() -> None:
     print("loading scores, cell maps and the Raven tables ...", flush=True)
     Handler.store = Store(args.device, refiner, species, taxon)
     Handler.store.start_uploads()
-    srv = Server(("127.0.0.1", args.port), Handler)
+    if args.public:
+        Handler.site = Site(args.max_upload_mb, args.max_upload_min, args.daily_uploads, args.disk_quota_gb,
+                            args.min_free_gb)
+    srv = Server(("127.0.0.1", args.port), Handler)        # loopback only: in --public mode the proxy is the way in
     url = f"http://127.0.0.1:{args.port}/"
-    print(f"review app at {url}  (log: {LOG_FILE})  Ctrl+C to stop", flush=True)
-    if not args.no_browser:
+    if args.public:
+        print(f"website at {url} (behind the proxy); reviewers at {url}{REVIEW_PREFIX.strip('/')}/ with "
+              f"{REVIEWER_HEADER}; uploads <= {args.max_upload_mb:g} MB, {args.max_upload_min:g} min, "
+              f"{args.daily_uploads}/day/address; quota {args.disk_quota_gb:g} GB  (log: {LOG_FILE})", flush=True)
+    else:
+        print(f"review app at {url}  (log: {LOG_FILE})  Ctrl+C to stop", flush=True)
+    if not args.no_browser and not args.public:
         webbrowser.open(url)
     try:
         srv.serve_forever()

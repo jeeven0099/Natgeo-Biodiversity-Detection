@@ -102,6 +102,7 @@ sections below.
 - [Review platform](#review-platform-yes--no--unknown-with-a-top-5-species-list)
 - [Audio editor](#audio-editor-open-record-cut-and-save-audio)
 - [New audio: detect calls on a file you add](#new-audio-detect-calls-on-a-file-you-add)
+- [Website: public upload page and reviewer login](#website-public-upload-page-and-reviewer-login)
 - [Review labels](#review-labels-the-logs-as-box-taxon-and-species-labels)
 - [Raven labels as reviews](#raven-labels-as-reviews)
 - [Learner 1: thresholds and box settings](#learner-1-thresholds-and-box-settings-from-the-reviews)
@@ -1238,8 +1239,8 @@ headless Chrome over CDP, fresh profile, server on port 8766 with `--review-dir`
 | Strip: minutes | the open minute brighter than the dimmed rest; a click on another minute opens it (minute 4); a click in the open minute centres the view there; near the minute's end the view stops at the minute's end |
 | Strip: drag over 6 positions | the view follows; at most 1 image mid-drag (a 150 ms rest), ≤ 2 in all |
 | Strip with the minute view off | a click at 70% centres the view there, width kept; the wheel zooms out |
-| Export button, yes / every answer | downloads `S01634_20250228_000000.Table.1.selections.txt` from `/api/raven_table.txt`: 78 / 79 selections, header + `X-Selections` rows |
-| Audio editor link | `/editor`, `target=_blank` |
+| Export button, yes / every answer | downloads `S01634_20250228_000000.Table.1.selections.txt` from `api/raven_table.txt` (relative since the website): 78 / 79 selections, header + `X-Selections` rows |
+| Audio editor link | `editor` (relative since the website), `target=_blank` |
 | JS exceptions | none |
 | Total | 40 checks, all pass |
 
@@ -1303,7 +1304,7 @@ one exception is **detect calls**, which sends the file to the review app on pur
   - If the server cannot read the original format (an AAC `.m4a`, for example), the editor sends the
     browser's decoded audio as a WAV instead, automatically.
   - When the scan is done, the status line gives the model box count and an "open in box review ↗"
-    link (`/?rec=<name>`).
+    link (`./?rec=<name>`, relative so it also works under `/review/` on the website).
 
 **Browser test** (`ui_editor.mjs` in the scratchpad: headless Chrome over CDP with Chrome's fake
 microphone (`--use-fake-device-for-media-stream`), fresh profile, server on port 8766; test WAVs written
@@ -1476,7 +1477,7 @@ from dataset recordings; an AAC `.m4a` made with ffmpeg):
 
 | Test | Result |
 |---|---|
-| Page | "add audio…" shown; earlier added recordings labelled `· added (my field clip.flac)` |
+| Page | "add audio…" shown; earlier added recordings labelled `· added` or, when the file had another name, `· added (<original name>)` such as `· added (my field clip.flac)` |
 | Add `clip_b.wav`, staying on the box | status "uploading … %" → "detecting calls: n/24 windows" → "calls detected: 4 model boxes"; clip_b opens by itself with its 23 items and spectrogram |
 | Status count | equals the list's count for the ticked groups (4 = 4) |
 | Sidecar | sha256 of the file sent, `WAV PCM_16` |
@@ -1485,7 +1486,7 @@ from dataset recordings; an AAC `.m4a` made with ffmpeg):
 | 5,000 random bytes | the server's reason shown ("cannot read …"); list unchanged |
 | `/?rec=clip_b`; `/?rec=nope` | opens clip_b and clears the address; "nope is not in the list (yet)" |
 | Editor: nothing open | detect calls disabled |
-| Unedited `clip_d.flac` | button disabled while sending; "clip_d: calls detected, 3 model boxes (all groups) · open in box review ↗", link `/?rec=clip_d`, new tab; the original FLAC's bytes received (sha256) |
+| Unedited `clip_d.flac` | button disabled while sending; "clip_d: calls detected, 3 model boxes (all groups) · open in box review ↗", link `./?rec=clip_d` (relative since the website), new tab; the original FLAC's bytes received (sha256) |
 | Cut 10 s, detect | `clip_d_edit`, a `WAV FLOAT` of 50 s at 48 kHz |
 | Open `tone3k.m4a` over the edit | asks first ("has edits that are not saved"); decoded by the browser, 20 s |
 | Detect on it | the server refuses AAC, the editor says so and sends the decoded WAV: `tone3k`, `WAV FLOAT`, 5 model boxes; no `.m4a` or partial file left |
@@ -1512,6 +1513,172 @@ The tests found four faults, all fixed:
   groups".
 - **Link colour.** The editor's link kept the browser's default blue on the dark theme. It now uses
   the accent colour.
+
+## Website: public upload page and reviewer login
+
+`review_app.py --public` serves one app in two roles: a public page where anyone can upload a
+recording and see and hear the calls found in it, and the review app for invited reviewers. Only
+reviewers' answers are logged, so only they make labels. A visitor can flag a box as "looks wrong";
+a flag is a hint for reviewers, never a label.
+
+```
+browser ──HTTPS──> Caddy (example.org) ──> review_app.py --public on 127.0.0.1:8765
+                     /review, /review/*   basic_auth (reviewers file outside the repo),
+                                          then X-Reviewer: <login name>
+                     everything else      public, X-Reviewer stripped
+```
+
+**Roles.**
+- **Public** (`/`, `/api/...`, `/u/<key>`, `/editor`): upload, the scan queue, and the visitor's own
+  uploads only: their spectrogram, model boxes, top 5, playback, flag and delete. No survey recording
+  is served (its boxes and spectrogram are 404), and nothing public carries a path, a reviewer's name
+  or learner state. A box a reviewer has answered shows `yes` with its species, or `no`.
+- **Reviewer** (`/review/...`): the full review app of the earlier sections. The name logged is the
+  login's (`X-Reviewer`), never the one in the request body. Without the header the answer is 403.
+  Reviewers see the flag counts and every upload.
+- Without `--public` the app is the local review app as before, with every request in the reviewer
+  role.
+
+**Private links.** Each upload gets a key (`secrets.token_urlsafe(18)`) and the link `/u/<key>`.
+Opening it stores the key in the `uploads` cookie (HttpOnly, SameSite=Lax, Secure under HTTPS, a
+year, the newest 40 keys) and redirects to `/?rec=<name>`. A visitor sees what their cookie's keys
+name and nothing else; the link is how they open it on another device or share it. Responses carry
+`Referrer-Policy: no-referrer`, so a key never leaves in a Referer.
+
+**Limits** (the defaults; each is an option):
+
+| Limit | Default | Answer when exceeded |
+|---|---|---|
+| File size | 700 MB (`--max-upload-mb`; Caddy stops at 701 MiB) | 400, "the file is … MB; the limit is 700 MB: cut it into parts" |
+| Duration | 60 min (`--max-upload-min`) | 400, "… min long; the limit is 60 min: cut it into parts" |
+| New uploads | 10 per address per day (`--daily-uploads`); reviewers are not counted | 429, "10 uploads a day per address: please try again tomorrow" |
+| Uploads folder | 50 GB (`--disk-quota-gb`) | 507, "the site's storage for uploads is full" |
+| Free disk left after an upload | 2 GB (`--min-free-gb`) | 507, "the server's disk is nearly full" |
+| Flags | 200 per address per day; comment cut to 500 characters | 429 |
+| JSON body | 64 KB | 413 |
+| Spectrogram / view audio | 120 s | 400 |
+| Heavy requests at once | 3 (spectrograms, audio, top 5s) | waits |
+
+- **Counts:** the daily counts are kept in memory only. Addresses (from `X-Forwarded-For`, which
+  Caddy sets) are never written to disk, and a restart clears the counts.
+- **Refusals:** a refused upload and a repeat of the same bytes do not use the day's count. Public
+  error messages carry no exception type.
+- **Bind:** the app listens on 127.0.0.1 only, so Caddy is the only way in.
+
+**What is kept for active learning.** Every upload stays in `data\uploads` (audio, sidecar with
+`via=website` or `via=reviewer` and its key, and the scan) until its owner deletes it. Flags go to
+`data\review\flags.csv`, with no reviewer or address column.
+
+**Delete.** The owner can delete an upload from the page (it asks first). The audio, scan and
+sidecar are removed, a row (recording, sha256, time, reason) goes to `data\uploads\deleted.csv`,
+the link returns 404, and the name is never reused (the same file again becomes `E-2`). A delete
+during the scan purges the files when the scan ends.
+
+**Dedup caveat.** The same bytes give the recording already added, so a second person who uploads
+an identical file gets the first upload's key, and with it the right to delete it. That is accepted:
+both of them hold the same audio.
+
+**Adding needs the scan files.** At start the app checks every file a scan reads besides the audio
+(`scan_audio.missing_files()`): the Perch model, the cell head, EarthChirp's library, its ESC-50
+outgroup and the class index. If one is missing it prints `adding audio is off: a scan needs …`,
+`can_add` is false, the upload button is off, and an upload is refused at once instead of failing
+after it was stored.
+
+### Deploy
+
+1. **Server files** (about 1.1 GB; no `dataset\`, no survey audio, no Raven tables, no review logs):
+
+   | Path | Size |
+   |---|---|
+   | `scripts\*.py`, `scripts\*.html`, `config\` | 4 MB |
+   | `external\bacpipe_model_checkpoints\perch_v2\perch_v2_no_dft.onnx` and `labels.txt` | 394 MB |
+   | `external\earthchirp_lib\` (`global_reflib_protos.npy`, `global_reflib_index.parquet`, `LICENSE.txt`) | 16 MB |
+   | `data\perch_windows\perch_cell_head.onnx` | 347 MB |
+   | `data\perch_windows\earthchirp_embeddings.npy`, `cell_maps.npy` | 189 + 63 MB |
+   | `data\perch_windows\window_scores.csv`, `segment_scores.csv`, `earthchirp_segments.csv` | 21 + 17 + 4 MB |
+   | `data\insecta_compare\esc50_emb.npy`, `esc50_meta.csv` | 12 MB |
+   | `data\review\calibration\` (the adopted learners) | 57 MB |
+
+2. **The app:** `deploy/callfinder.service` runs
+   `python -X utf8 scripts/review_app.py --public --device cpu --no-browser --port 8765` as user
+   `natgeo` in `/srv/natgeo`, restarting on failure. Copy it to `/etc/systemd/system/`.
+3. **Caddy:** copy `deploy/Caddyfile` to `/etc/caddy/Caddyfile` and replace `example.org` with the
+   domain (its DNS A record must point at the server); Caddy gets the certificate itself.
+4. **Reviewers:** one line per reviewer in `/etc/caddy/reviewers.caddy`, outside the repo:
+   `<name> <hash>`, the hash from `caddy hash-password --plaintext '<password>'`. The name is what
+   the log records. After an edit, `sudo systemctl reload caddy`.
+
+`example.org`, `/srv/natgeo` and `natgeo` are placeholders. The real address and logins stay out of
+this public repo, as do `data\review` (it holds reviewers' names) and `data\uploads`. The deploy has
+been run only as a server-shaped copy on this laptop (below), not yet on a Linux server.
+
+On CPU a scan runs at about 2.7 windows/s (8 windows in 3.0–3.5 s on the laptop), so a 60-minute
+upload takes about 9 minutes; the page shows the queue position and "detecting calls: n/N windows".
+
+### Tests
+
+All on scratch `--review-dir` / `--uploads-dir` copies, with
+`--max-upload-mb 4 --max-upload-min 0.75 --daily-uploads 3`; Caddy is simulated by the
+`X-Reviewer`, `X-Forwarded-For` and `X-Forwarded-Proto` headers.
+
+**Server test** (`t_public.py` in the scratchpad). Phase a, 79 checks, all pass:
+
+| Area | Checks |
+|---|---|
+| Routes | `/` is the public page with the security headers; `/editor` served; `/review` → `/review/` with the query kept; blank or missing `X-Reviewer` → 403; with it, the review page and meta with the login's name |
+| Public meta | no cookie: no recordings, 3 uploads left; no paths, names or learner state; survey boxes and spectrogram 404 |
+| Upload | 200 with `u/<key>`; cookie HttpOnly, SameSite=Lax, Secure under https, Path=/, a year; sidecar holds the key and `via=website`; queue positions numbered in order; the 4th new upload from one address 429 and 0 left; over 0.75 min "is 1.00 min long; the limit is 0.75 min"; 20.3 MB "the limit is 4 MB … cut it into parts"; unreadable audio 400; public errors have no exception type, reviewer errors keep it; same bytes → the existing key; refusals and dedup do not use the count; reviewer uploads are not counted (`via=reviewer`) |
+| Ownership | cookie A lists A only, with its link and no path; B's boxes, view audio and top 5 (also with a forged id) 404; A's boxes are model boxes only, the same as the reviewer sees, with exactly the public fields; top 5 runs on the tight span without `check_max_diff`; spectrogram PNG, over 120 s 400; `audio.wav` pad capped at 2 s, bad mode 400; `/api/box` has no taxon fields or history |
+| Links | `/u/<key>` 302 to `/?rec=` and sets the cookie, adds the key and drops unknown ones; unknown key 404; a malformed cookie gives no recordings and no error |
+| Flags and answers | flag own box 200; the `flags.csv` row has the comment cut to 500 and no reviewer or address; another's box 404; JSON over 64 KB 413; the reviewer sees the flag count; reviewer log 200 with the login's name, not the body's; public `/api/log` 404 and `/review/api/log` without login 403; the public box shows `yes` with species, `no` without |
+| Delete | another's 404; own 200 and the cookie loses the key; audio, scan, sidecar gone; `deleted.csv` row with reason `owner`; link and boxes 404 even with the old cookie; the reviewer list drops it (137 → 134 + 3); a delete right after upload purges the files mid-scan; the same file again → `E-2` |
+
+Phase b, after a restart, 6 checks, all pass: A's link works and meta lists A; C's and E's links
+still 404 and the deleted recordings are not back; the daily counts are cleared. Both phases were
+rerun after the scan-files guard, all pass.
+
+**Storage test** (`t_site.py`), 5 checks, all pass: a missing uploads folder allows a small file; a
+quota of 6,000 bytes with 5,000 used allows 1,000 more and refuses 1,001 (507, "the site's storage
+for uploads is full"); `min_free` above the free disk → 507 ("the server's disk is nearly full");
+`min_free` 0 allows.
+
+**Browser test** (`ui_public.mjs`, headless Chrome over CDP), 48 checks, all pass:
+
+| Area | Checks |
+|---|---|
+| Page | title; no survey recordings; "Up to 4 MB and 0.75 min … 3 of 3 uploads left today"; groups named for people; a survey `?rec=` opens nothing |
+| Refusals | no upload without the consent tick; a 5 MB file refused in the browser; a 1-minute file refused by the server with no "Error:" prefix; neither uses the count |
+| Upload | progress, the scan state, an absolute `/u/` link; A opens by itself (`?rec=A`); 2 uploads left |
+| Viewer | spectrogram not flat; "A.wav · 0:20"; box list, box card and top 5; all groups ticked lists 4 rows; a click on the canvas selects the box under it |
+| Sound | play call (band-passed), original, P plays the minute and P again stops, ▶ at a top-5 name plays its 5 s window |
+| Flag | sent, button off, a row in `flags.csv` |
+| Settings | colour map and contrast remembered; no groups ticked lists no boxes; after reload the groups, colours and contrast are kept and A reopens; consent is asked again after a reload |
+| Queue and limit | "detecting calls: n/8 windows" while waiting; at 0 left "choose a file…" is off; the 4th upload says "3 uploads a day per address: please try again tomorrow", with no "Error:" prefix |
+| Links and delete | a browser with no cookie lists nothing; the private link opens A only; delete asks first, closes the viewer, and the link then returns 404 |
+| Layout | 390 px wide with no horizontal scroll; dark mode background rgb(22, 22, 21); no page errors |
+
+**Server-shaped copy.** The server files above copied to a scratch folder (1.1 GB, no audio but
+the test uploads), run on CPU:
+- **Without the ESC-50 files:** the start prints "adding audio is off: a scan needs
+  data\insecta_compare\esc50_emb.npy, data\insecta_compare\esc50_meta.csv"; public `can_add` is
+  false; an upload is refused at once (400, no type prefix) and nothing is stored.
+- **With them:** `ui_public.mjs` 48/48. Three scans of 8 windows took 3.0–3.5 s each, with Perch and
+  the cell head on `CPUExecutionProvider`.
+
+**Unchanged elsewhere.** The local review app's links became relative so they work under
+`/review/`; the earlier suites, rerun in local mode, all pass: `ui_display` 32/32, `ui_minute` 26/26,
+`ui_editor` 54/54, `ui_view` 40/40, `ui_addaudio` 25/25, and `t_upload` phase a 27 and phase b 4.
+
+The tests found five faults, all fixed:
+- **Rounding in the size and duration messages.** These now print the limit as given (0.75 min,
+  4 MB) and the file to two decimals.
+- **"1 min" on the page.** The limits line rounded 0.75 min up; it now shows 0.75.
+- **Exception type in public errors.** Errors read "ValueError: …"; public errors now carry the
+  message only.
+- **Missing ESC-50 outgroup.** The server copy at first lacked `esc50_emb.npy` and
+  `esc50_meta.csv`, so every upload was stored and then failed with "FileNotFoundError". The app
+  now checks the scan files at start and turns adding off with the reason.
+- **Upload button at 0 left.** It stayed on when no uploads were left today; it is now off.
 
 ## Review labels: the logs as box, taxon and species labels
 
@@ -2628,8 +2795,9 @@ scripts/              Perch / EarthChirp zero-shot pipeline (this page)
     insecta_compare.py       EarthChirp vs Perch on Insecta
     cell_maps.py             Perch 16 x 4 cells -> tightened boxes
     perch_viewer.py          viewer helpers, filtered playback
-    review_app.py/.html      local review platform (+ Raven table export)
+    review_app.py/.html      review platform (+ Raven table export); --public serves the website
     review_editor.html       audio editor at /editor: open, record, cut / paste, save WAV, detect calls
+    public_app.html          the website's public page: upload a file, see and hear the calls found
     scan_audio.py            zero-shot scan of a new audio file for the review app (data/uploads)
     review_labels.py         review logs -> box / taxon / species / audit labels
     raven_match.py           Raven boxes matched to model boxes (time IoU, 1:1), Raven label -> names
@@ -2642,6 +2810,7 @@ scripts/              Perch / EarthChirp zero-shot pipeline (this page)
     build_common_names.py    English common names (eBird + GBIF) -> config/common_names.csv
 config/               Perch class index, taxonomy, target list, common names
 jobs/                 SLURM job for GPU extraction
+deploy/               website: Caddyfile (HTTPS + reviewer login) and a systemd unit (placeholders only)
 notebooks/            perch_zeroshot_viewer.ipynb (the viewer)
 docs/figures/         README figures
 data/                 manifest.csv, splits.csv, zeroshot_report.csv (caches are git-ignored)

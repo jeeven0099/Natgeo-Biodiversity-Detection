@@ -1,0 +1,595 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Call Finder</title>
+<style>
+:root {
+  --bg: #f6f6f3; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #dcdcd6;
+  --accent: #2458c6; --yes: #23863a; --no: #c0392b; --unk: #a07800; --sel: #e8eefb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #20201e; --ink: #ecece8; --muted: #9b9b94; --line: #3a3a36;
+    --accent: #7ea3f2; --yes: #4cc26a; --no: #ef6b5e; --unk: #e0b43c; --sel: #27324a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+header { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; padding: 10px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 17px; margin: 0; }
+header .sub { color: var(--muted); font-size: 13px; flex: 1; min-width: 200px; }
+header a { font-size: 13px; }
+a { color: var(--accent); }
+main { max-width: 1100px; margin: 0 auto; padding: 12px 16px 40px; display: grid; gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+.card h2 { font-size: 15px; margin: 0 0 8px; }
+select, input, textarea, button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
+select, input { padding: 3px 6px; }
+textarea { padding: 5px 7px; width: 100%; resize: vertical; }
+button { padding: 5px 11px; cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+label.inl { display: inline-flex; gap: 5px; align-items: center; }
+.small { font-size: 12.5px; color: var(--muted); }
+.err { color: var(--no); }
+.ok { color: var(--yes); }
+.row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+#drop { border: 2px dashed var(--line); border-radius: 8px; padding: 18px 12px; text-align: center; margin: 8px 0; }
+#drop.over { border-color: var(--accent); background: var(--sel); }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.linkbox { display: flex; gap: 6px; margin-top: 6px; }
+.linkbox input { flex: 1; min-width: 0; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+#uploads .u { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+#uploads .u:first-child { border-top: 0; }
+#uploads .u.cur { background: var(--sel); margin: 0 -14px; padding: 8px 14px; }
+#uploads .name { font-weight: 600; overflow-wrap: anywhere; }
+#uploads .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: start; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+.lanes { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.lanes label { display: inline-flex; gap: 4px; align-items: center; font-size: 13.5px; }
+#specwrap { position: relative; margin-top: 8px; touch-action: manipulation; }
+#cv { display: block; width: 100%; height: 320px; border-radius: 4px; background: #fff; cursor: crosshair; }
+@media (max-width: 640px) { #cv { height: 240px; } }
+#specmsg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; color: var(--muted); }
+table.list { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table.list td { padding: 4px 6px; border-top: 1px solid var(--line); }
+table.list tr { cursor: pointer; }
+table.list tr:hover, table.list tr.cur { background: var(--sel); }
+#boxlist { max-height: 220px; overflow-y: auto; margin-top: 8px; }
+table.top { width: 100%; border-collapse: collapse; }
+table.top td { padding: 4px 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.top td.k { width: 20px; color: var(--muted); }
+.cn { color: var(--muted); }
+.score { display: inline-block; height: 8px; background: var(--accent); border-radius: 2px; vertical-align: middle; }
+.tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; border: 1px solid var(--line); }
+.tag.yes { color: var(--yes); border-color: var(--yes); }
+.tag.no { color: var(--no); border-color: var(--no); }
+.tag.unknown { color: var(--unk); border-color: var(--unk); }
+details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 6px; }
+.empty { color: var(--muted); padding: 6px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Call Finder</h1>
+  <span class="sub">Upload a sound recording and see where the models hear birds, frogs, insects and other sounds.</span>
+  <a href="editor" title="open, trim and cut a recording in your browser, then send it here">audio editor</a>
+  <a href="review/" title="for invited reviewers (sign-in)">reviewers</a>
+</header>
+<main>
+  <section class="card" id="addcard">
+    <h2>Upload a recording</h2>
+    <div class="small" id="limits">…</div>
+    <div id="drop">
+      <div><button class="primary" id="pick">choose a file…</button> <span class="small">or drop it here</span></div>
+      <input type="file" id="file" accept="audio/*,.wav,.flac,.ogg,.mp3,.aif,.aiff" hidden>
+    </div>
+    <label class="inl small" style="align-items:flex-start"><input type="checkbox" id="agree" style="margin-top:3px">
+      <span>I may share this recording. It is stored on this server so invited reviewers can check the detections and
+        improve the models. Anyone with its private link can open it, and I can delete it at any time.</span></label>
+    <div id="addstat" class="small" style="margin-top:8px"></div>
+    <div class="bar" id="upbar" hidden><i></i></div>
+    <div id="newlink" hidden>
+      <div class="small" style="margin-top:8px">Your private link: keep it to come back to this upload from another browser or device.</div>
+      <div class="linkbox"><input id="newlinkv" readonly><button data-copy="newlinkv">copy</button></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Your uploads</h2>
+    <div id="uploads"><div class="empty">…</div></div>
+    <div class="small" style="margin-top:6px">This browser remembers your uploads. Elsewhere, open an upload's private link.</div>
+  </section>
+
+  <section class="card" id="viewer" hidden>
+    <h2 id="vtitle"></h2>
+    <div class="row">
+      <button id="prevMin" title="previous minute ([)">◀</button>
+      <select id="minute" title="minute of the recording"></select>
+      <button id="nextMin" title="next minute (])">▶</button>
+      <button id="playView" title="play this minute, all frequencies (P)">▶ play minute</button>
+      <label class="inl small">contrast <input type="range" id="contrast" min="0" max="100" value="50" style="width:90px"></label>
+      <label class="inl small">colours <select id="cmap"><option>grey</option><option>viridis</option><option>magma</option></select></label>
+    </div>
+    <div class="lanes" id="lanes" style="margin-top:8px"></div>
+    <div id="specwrap"><canvas id="cv"></canvas><div id="specmsg"></div></div>
+    <div class="small" id="hint" style="margin-top:4px">Each box is a stretch where a model scored a group above its threshold. Click a box for the model's top 5 names.</div>
+    <div id="boxlist"></div>
+  </section>
+
+  <section class="card" id="boxcard" hidden>
+    <h2 id="btitle"></h2>
+    <div id="binfo" class="small"></div>
+    <div class="row" style="margin-top:8px">
+      <button id="playBox" class="primary" title="the box's frequency band only (space)">▶ play call</button>
+      <button id="playOrig" title="every frequency">▶ original sound</button>
+    </div>
+    <div style="margin-top:10px"><b>Model's top 5</b> <span class="small" id="scorename"></span></div>
+    <div id="topwrap"></div>
+    <details id="allwrap" hidden><summary>Perch's top 5 over all its classes (if the group looks wrong)</summary><div id="topall"></div></details>
+    <div style="margin-top:12px">
+      <textarea id="flagtxt" rows="2" maxlength="500" placeholder="optional: what is wrong? (e.g. it is a car, not a bird)"></textarea>
+      <div class="row" style="margin-top:6px"><button id="flag">this looks wrong</button><span id="flagstat" class="small"></span></div>
+    </div>
+  </section>
+</main>
+<audio id="au" preload="none"></audio>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const api = async (path, opts) => {
+  const r = await fetch(path, opts);
+  let j;
+  try { j = await r.json(); } catch { j = {error: r.status === 413 ? "the request is too large" : r.statusText || "server error"}; }
+  if (!r.ok || j.error) throw new Error(j.error || r.statusText);
+  return j;
+};
+const post = (path, body) => api(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+const fmt = (x, n = 2) => Number(x).toFixed(n);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const store = {get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
+               set(k, v) { try { localStorage.setItem(k, v); } catch {} }};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const mmss = (s, d = 1) => { s = Math.round(s * 10 ** d) / 10 ** d; const m = Math.floor(s / 60), r = s - 60 * m; return `${m}:${r.toFixed(d).padStart(d ? d + 3 : 2, "0")}`; };
+const absLink = l => new URL(l, location.href).href;
+const LANE_NAMES = {Aves: "Birds", Amphibia: "Frogs and toads", Insecta: "Insects (Perch)", Mammalia: "Mammals",
+  Anthropogenic: "Human-made sound", Weather: "Weather (rain, wind)", "EC-Insecta": "Insects (EarthChirp)",
+  "EC-margin": "Insects (EarthChirp margin)"};
+const laneName = l => LANE_NAMES[l] || l;
+
+let META = null, REC = null, BOXES = [], MIN = 0, SEL = null, PRED = null, predSeq = 0, specSeq = 0;
+let view = [0, 60], img = null, imgC = null, imgView = null, LUT = null, quietCss = "#fff";
+let WANT = null;                 // the upload to open when its scan is done
+let play = null;                 // {a, b}: what the audio element holds, in recording seconds
+
+// ---------------- meta, uploads list ----------------
+async function refreshMeta() {
+  META = await api("api/meta");
+  const left = META.uploads_left_today;
+  $("limits").textContent = META.can_add
+    ? `Up to ${+(+META.max_upload_mb).toFixed(2)} MB and ${+(+META.max_upload_min).toFixed(2)} min per file (wav, flac, ogg, mp3, aiff); `
+      + (left == null ? "" : `${left} of ${META.daily_uploads} uploads left today. `)
+      + "Longer files: cut them into parts in the audio editor."
+    : "Uploads are switched off on this server at the moment.";
+  $("pick").disabled = !canUpload();
+  if (!$("lanes").childElementCount) fillLanes();
+  renderUploads();
+}
+// none left today: the button is off (the server refuses anyway); a reload after midnight turns it back on
+const canUpload = () => !!META && META.can_add && !(META.uploads_left_today != null && META.uploads_left_today <= 0);
+let SCANS = [];
+function renderUploads() {
+  const pending = SCANS.filter(j => j.state !== "done" && !META.recordings.some(r => r.id === j.rec));
+  if (!META.recordings.length && !pending.length) {
+    $("uploads").innerHTML = `<div class="empty">No uploads yet: upload a recording above to find its calls.</div>`;
+    return;
+  }
+  const rows = META.recordings.map(r => `<div class="u${REC && REC.id === r.id ? " cur" : ""}">
+      <div><div class="name">${esc(r.name)}</div>
+        <div class="small">${mmss(r.duration_s, 0)} · ${nBoxes(r.counts)} boxes in the ticked groups · added ${esc(String(r.added_at).replace("T", " ").slice(0, 16))}</div></div>
+      <div class="acts"><button data-open="${esc(r.id)}">open</button><button data-link="${esc(r.link)}" title="copy the private link">copy link</button>
+        <button data-del="${esc(r.id)}" data-name="${esc(r.name)}" title="delete the file and its detections from the server">delete</button></div></div>`);
+  const prow = pending.map(j => `<div class="u"><div><div class="name">${esc(j.name || j.rec)}</div>
+      <div class="small ${j.state === "error" ? "err" : ""}">${esc(scanText(j))}</div>
+      ${j.state === "running" && j.total ? `<div class="bar"><i style="width:${100 * j.done / j.total}%"></i></div>` : ""}</div>
+      <div class="acts">${j.link ? `<button data-link="${esc(j.link)}">copy link</button>` : ""}
+        <button data-del="${esc(j.rec)}" data-name="${esc(j.name || j.rec)}">delete</button></div></div>`);
+  $("uploads").innerHTML = prow.concat(rows).join("");
+}
+const scanText = j => j.state === "queued" ? `waiting to be scanned${j.position > 1 ? `: ${j.position - 1} file${j.position > 2 ? "s" : ""} ahead` : ""}`
+  : j.state === "running" ? `detecting calls: ${j.done}/${j.total} windows`
+  : j.state === "done" ? "calls detected" : (j.error || "the scan failed");
+const nBoxes = c => lanesOn().reduce((s, g) => s + ((c || {})[g] || 0), 0);
+
+$("uploads").addEventListener("click", async e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  if (b.dataset.open) openRec(b.dataset.open);
+  else if (b.dataset.link) copyText(absLink(b.dataset.link), b);
+  else if (b.dataset.del) {
+    if (!confirm(`Delete "${b.dataset.name}" and its detections from the server? Its private link stops working. This cannot be undone.`)) return;
+    b.disabled = true;
+    try {
+      await post("api/delete", {rec: b.dataset.del});
+      if (REC && REC.id === b.dataset.del) closeRec();
+      SCANS = SCANS.filter(j => j.rec !== b.dataset.del);
+      await refreshMeta();
+    } catch (err) { b.disabled = false; alert(err.message); }
+  }
+});
+function copyText(text, btn) {
+  const done = () => { const t = btn.textContent; btn.textContent = "copied"; setTimeout(() => { btn.textContent = t; }, 1200); };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, () => prompt("Copy the link:", text));
+  else prompt("Copy the link:", text);
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("button[data-copy]");
+  if (b) copyText($(b.dataset.copy).value, b);
+});
+
+// ---------------- upload ----------------
+const say = h => { $("addstat").innerHTML = h; };
+function upload(file, onProgress) {
+  return new Promise((ok, bad) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", `api/upload?name=${encodeURIComponent(file.name)}`);
+    x.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => {
+      let j;
+      try { j = JSON.parse(x.responseText); } catch { j = {error: x.status === 413 ? "the file is too large" : x.statusText || "upload failed"}; }
+      if (x.status >= 400 || j.error) bad(new Error(j.error || x.statusText)); else ok(j);
+    };
+    x.onerror = () => bad(new Error("the upload failed (connection lost)"));
+    x.send(file);
+  });
+}
+async function addFile(file) {
+  if (!META.can_add) return;
+  if (!$("agree").checked) { say(`<span class="err">Tick the box above the upload first.</span>`); return; }
+  if (file.size > META.max_upload_mb * 2 ** 20) {
+    say(`<span class="err">${esc(file.name)} is ${(file.size / 2 ** 20).toFixed(0)} MB, over the ${META.max_upload_mb} MB limit: cut it into parts (audio editor).</span>`);
+    return;
+  }
+  const bar = $("upbar");
+  bar.hidden = false; bar.firstElementChild.style.width = "0";
+  $("pick").disabled = true;
+  try {
+    say(`uploading ${esc(file.name)} …`);
+    const r = await upload(file, p => { bar.firstElementChild.style.width = `${100 * p}%`; say(`uploading ${esc(file.name)} ${Math.round(100 * p)}%`); });
+    say(r.created ? `${esc(file.name)} uploaded: the models are scanning it (see Your uploads).`
+                  : `This file was uploaded before: opening it.`);
+    $("newlinkv").value = absLink(r.link);
+    $("newlink").hidden = false;
+    WANT = r.rec;
+    await refreshMeta();
+    pollScans();
+  } catch (e) {
+    say(`<span class="err">${esc(e.message)}</span>`);
+  } finally {
+    bar.hidden = true; $("pick").disabled = !canUpload();
+  }
+}
+$("pick").onclick = () => $("file").click();
+$("file").onchange = () => { const f = $("file").files[0]; $("file").value = ""; if (f) addFile(f); };
+const drop = $("drop");
+drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", e => {
+  e.preventDefault(); drop.classList.remove("over");
+  const f = e.dataTransfer.files[0];
+  if (f) addFile(f);
+});
+
+let polling = false;
+async function pollScans() {
+  if (polling) return;
+  polling = true;
+  try {
+    for (;;) {
+      try { SCANS = await api("api/scans"); } catch { await sleep(3000); continue; }
+      const missing = SCANS.some(j => j.state === "done" && !META.recordings.some(r => r.id === j.rec));
+      if (missing) await refreshMeta(); else renderUploads();
+      if (WANT && META.recordings.some(r => r.id === WANT)) {
+        const w = WANT; WANT = null;
+        if (!REC || REC.id !== w) await openRec(w);
+      }
+      if (!SCANS.some(j => j.state === "queued" || j.state === "running") && !missing) break;
+      await sleep(2000);
+    }
+  } finally { polling = false; }
+}
+
+// ---------------- the recording: minutes, spectrogram, boxes ----------------
+function fillLanes() {
+  let on;
+  try { on = JSON.parse(store.get("pub_lanes", "null")); } catch { on = null; }
+  if (!Array.isArray(on)) on = META.default_on;
+  $("lanes").innerHTML = META.lanes.map(l => `<label title="${esc(l)}: ${esc(META.models[l])}, threshold ${META.thresholds[l]}">
+    <input type="checkbox" value="${esc(l)}" ${on.includes(l) ? "checked" : ""}><span class="sw" style="background:${META.colors[l] || "#999"}"></span>${esc(laneName(l))}</label>`).join("");
+}
+const lanesOn = () => [...document.querySelectorAll("#lanes input:checked")].map(c => c.value);
+$("lanes").addEventListener("change", () => {
+  store.set("pub_lanes", JSON.stringify(lanesOn()));
+  renderUploads();
+  if (REC) { fillMinutes(); renderBoxList(); draw(); }
+});
+
+async function openRec(id) {
+  const r = META.recordings.find(x => x.id === id);
+  if (!r) return;
+  REC = r; BOXES = []; SEL = null; PRED = null; stopAudio();
+  history.replaceState(null, "", `?rec=${encodeURIComponent(id)}`);
+  $("viewer").hidden = false; $("boxcard").hidden = true;
+  $("vtitle").textContent = `${r.name} · ${mmss(r.duration_s, 0)}`;
+  renderUploads();
+  try { BOXES = await api(`api/boxes?rec=${encodeURIComponent(id)}`); }
+  catch (e) { $("specmsg").textContent = e.message; return; }
+  if (!REC || REC.id !== id) return;
+  BOXES.sort((a, b) => a.t_begin - b.t_begin);
+  fillMinutes();
+  gotoMinute(0);
+  $("viewer").scrollIntoView({behavior: "smooth", block: "start"});
+}
+function closeRec() {
+  REC = null; BOXES = []; SEL = null; stopAudio();
+  $("viewer").hidden = true; $("boxcard").hidden = true;
+  history.replaceState(null, "", location.pathname);
+}
+const nMinutes = () => Math.max(1, Math.ceil(REC.duration_s / META.minute_s - 1e-9));
+const shown = () => { const on = new Set(lanesOn()); return BOXES.filter(b => on.has(b.lane)); };
+function fillMinutes() {
+  const M = META.minute_s, bx = shown(), cur = MIN;
+  $("minute").innerHTML = Array.from({length: nMinutes()}, (_, m) => {
+    const n = bx.filter(b => b.t_end > m * M && b.t_begin < (m + 1) * M).length;
+    return `<option value="${m}">${mmss(m * M, 0)}–${mmss(Math.min(REC.duration_s, (m + 1) * M), 0)} · ${n} box${n === 1 ? "" : "es"}</option>`;
+  }).join("");
+  $("minute").value = String(Math.min(cur, nMinutes() - 1));
+}
+function gotoMinute(m) {
+  if (!REC) return;
+  MIN = Math.max(0, Math.min(nMinutes() - 1, m));
+  $("minute").value = String(MIN);
+  $("prevMin").disabled = MIN === 0; $("nextMin").disabled = MIN === nMinutes() - 1;
+  view = [MIN * META.minute_s, Math.min(REC.duration_s, (MIN + 1) * META.minute_s)];
+  if (play && (play.b <= view[0] || play.a >= view[1])) stopAudio();
+  renderBoxList(); loadSpec();
+}
+$("minute").onchange = () => gotoMinute(+$("minute").value);
+$("prevMin").onclick = () => gotoMinute(MIN - 1);
+$("nextMin").onclick = () => gotoMinute(MIN + 1);
+
+async function loadSpec() {
+  const seq = ++specSeq, [a, b] = view, rec = REC.id;
+  $("specmsg").textContent = "drawing the spectrogram …";
+  img = null; draw();
+  try {
+    const r = await fetch(`api/spec.png?rec=${encodeURIComponent(rec)}&a=${fmt(a, 3)}&b=${fmt(b, 3)}&n=1024`);
+    if (!r.ok) { let m = r.statusText; try { m = (await r.json()).error || m; } catch {} throw new Error(m); }
+    const bmp = await createImageBitmap(await r.blob());
+    if (seq !== specSeq) return;
+    img = bmp; imgView = [a, b]; colourise();
+    $("specmsg").textContent = "";
+  } catch (e) { if (seq === specSeq) $("specmsg").textContent = `no spectrogram: ${e.message}`; }
+  draw();
+}
+
+// the PNG is grey dB: 0 = the view's loudest, 255 = META.spec_range_db below; the page colours it
+const CMAPS = {
+  grey: ["#ffffff", "#000000"],
+  viridis: ["#440154", "#482878", "#3e4989", "#31688e", "#26828e", "#1f9e89", "#35b779", "#6ece58", "#b5de2b", "#fde725"],
+  magma: ["#000004", "#180f3d", "#440f76", "#721f81", "#9e2f7f", "#cd4071", "#f1605d", "#fd9668", "#feca8d", "#fcfdbf"],
+};
+const dbSpan = c => c <= 50 ? 120 - 0.8 * c : 80 - (c - 50);    // contrast 0..50..100 -> 120..80..30 dB shown
+function makeLut() {
+  const R = dbSpan(+$("contrast").value);
+  const rgb = (CMAPS[$("cmap").value] || CMAPS.grey).map(h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16)));
+  LUT = new Uint8ClampedArray(256 * 3);
+  for (let g = 0; g < 256; g++) {
+    const db = -META.spec_range_db * g / 255, v = Math.max(0, Math.min(1, (db + R) / R));
+    const p = v * (rgb.length - 1), i = Math.min(rgb.length - 2, Math.floor(p)), f = p - i;
+    for (let k = 0; k < 3; k++) LUT[3 * g + k] = rgb[i][k] + (rgb[i + 1][k] - rgb[i][k]) * f;
+  }
+  quietCss = `rgb(${LUT[765]},${LUT[766]},${LUT[767]})`;
+}
+function colourise() {
+  if (!img) return;
+  if (!LUT) makeLut();
+  const c = imgC || document.createElement("canvas");
+  c.width = img.width; c.height = img.height;
+  const x = c.getContext("2d", {willReadFrequently: true});
+  x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height), p = d.data;
+  for (let i = 0; i < p.length; i += 4) { const g = 3 * p[i]; p[i] = LUT[g]; p[i + 1] = LUT[g + 1]; p[i + 2] = LUT[g + 2]; p[i + 3] = 255; }
+  x.putImageData(d, 0, 0);
+  imgC = c;
+}
+function displayChanged() {
+  store.set("pub_contrast", $("contrast").value); store.set("pub_cmap", $("cmap").value);
+  makeLut(); colourise(); draw();
+}
+$("contrast").addEventListener("input", displayChanged);
+$("cmap").addEventListener("change", displayChanged);
+
+const cv = $("cv"), ctx = cv.getContext("2d");
+const fmax = () => REC ? REC.fmax_khz : 24;
+function geom() {
+  const W = cv.clientWidth, H = cv.clientHeight, [a, b] = view;
+  return {W, H, x: t => (t - a) / (b - a) * W, y: f => H * (1 - f / fmax()), t: x => a + x / W * (b - a), f: y => (1 - y / H) * fmax()};
+}
+function draw() {
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = quietCss; ctx.fillRect(0, 0, W, H);
+  if (!REC) return;
+  const g = geom();
+  if (imgC && imgView && imgView[0] === view[0] && imgView[1] === view[1]) {
+    ctx.imageSmoothingEnabled = true; ctx.drawImage(imgC, 0, 0, W, H);
+  }
+  const dark = $("cmap").value !== "grey";
+  for (const b of shown()) {
+    if (b.t_end < view[0] || b.t_begin > view[1]) continue;
+    const x0 = g.x(b.t_begin), x1 = g.x(b.t_end), y0 = g.y(b.hi_khz), y1 = g.y(b.lo_khz), sel = SEL && SEL.id === b.id;
+    ctx.strokeStyle = META.colors[b.lane] || "#999";
+    ctx.lineWidth = sel ? 3 : 1.6;
+    ctx.setLineDash(b.reviewed === "no" ? [5, 4] : []);
+    if (sel) { ctx.fillStyle = (META.colors[b.lane] || "#999") + "33"; ctx.fillRect(x0, y0, x1 - x0, y1 - y0); }
+    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+  }
+  ctx.setLineDash([]);
+  // axes: kHz on the left, time at the bottom
+  ctx.font = "11px system-ui, sans-serif"; ctx.textBaseline = "middle";
+  const step = [0.5, 1, 2, 4, 5, 10].find(s => fmax() / s <= 7) || 10;
+  const label = (txt, x, y, align) => {
+    ctx.textAlign = align; const w = ctx.measureText(txt).width + 6, x0 = align === "left" ? x : align === "center" ? x - w / 2 : x - w;
+    ctx.fillStyle = dark ? "rgba(0,0,0,.55)" : "rgba(255,255,255,.75)"; ctx.fillRect(x0, y - 8, w, 16);
+    ctx.fillStyle = dark ? "#fff" : "#222"; ctx.fillText(txt, align === "left" ? x + 3 : align === "center" ? x : x - 3, y);
+  };
+  for (let f = step; f < fmax() - step / 3; f += step) label(`${f} kHz`, 2, g.y(f), "left");
+  const span = view[1] - view[0], ts = span > 30 ? 10 : span > 12 ? 5 : span > 5 ? 2 : 1;
+  for (let t = Math.ceil(view[0] / ts) * ts; t < view[1] - ts / 3; t += ts) if (t > view[0] + ts / 3) label(mmss(t, 0), g.x(t), H - 9, "center");
+  if (play && !$("au").paused) {
+    const t = play.a + $("au").currentTime;
+    if (t >= view[0] && t <= view[1]) { ctx.strokeStyle = "#e33"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(g.x(t), 0); ctx.lineTo(g.x(t), H); ctx.stroke(); }
+  }
+}
+window.addEventListener("resize", () => draw());
+cv.addEventListener("click", e => {
+  if (!REC) return;
+  const r = cv.getBoundingClientRect(), g = geom(), t = g.t(e.clientX - r.left), f = g.f(e.clientY - r.top);
+  const tol = 4 / r.width * (view[1] - view[0]);
+  const hits = shown().filter(b => t >= b.t_begin - tol && t <= b.t_end + tol && f >= b.lo_khz - 0.1 && f <= b.hi_khz + 0.1);
+  hits.sort((p, q) => (p.t_end - p.t_begin) * (p.hi_khz - p.lo_khz) - (q.t_end - q.t_begin) * (q.hi_khz - q.lo_khz));
+  if (hits.length) selectBox(hits[0]);
+});
+
+function renderBoxList() {
+  const bx = shown().filter(b => b.t_end > view[0] && b.t_begin < view[1]);
+  $("boxlist").innerHTML = bx.length ? `<table class="list">${bx.map(b => `<tr data-id="${esc(b.id)}" class="${SEL && SEL.id === b.id ? "cur" : ""}">
+      <td><span class="sw" style="background:${META.colors[b.lane] || "#999"}"></span> ${esc(laneName(b.lane))}</td>
+      <td>${mmss(b.t_begin)}–${mmss(b.t_end)}</td><td>${fmt(b.lo_khz, 1)}–${fmt(b.hi_khz, 1)} kHz</td>
+      <td class="small">score ${fmt(b.max_score, 3)}</td><td>${reviewTag(b)}</td></tr>`).join("")}</table>`
+    : `<div class="empty">No boxes of the ticked groups in this minute.</div>`;
+}
+$("boxlist").addEventListener("click", e => {
+  const tr = e.target.closest("tr[data-id]");
+  if (tr) { const b = BOXES.find(x => x.id === tr.dataset.id); if (b) selectBox(b); }
+});
+const reviewTag = b => b.reviewed === "yes" ? `<span class="tag yes" title="a reviewer confirmed this call">checked</span>`
+  : b.reviewed === "no" ? `<span class="tag no" title="a reviewer said this is not a call of this group">rejected</span>`
+  : b.reviewed === "unknown" ? `<span class="tag unknown" title="a reviewer could not tell">unsure</span>` : "";
+
+// ---------------- one box: details, top 5, play, flag ----------------
+function selectBox(b) {
+  SEL = b; PRED = null;
+  const M = META.minute_s, m = Math.floor(b.t_begin / M);
+  if (b.t_begin >= view[1] || b.t_end <= view[0]) gotoMinute(m); else { renderBoxList(); draw(); }
+  $("boxcard").hidden = false;
+  $("btitle").innerHTML = `<span class="sw" style="background:${META.colors[b.lane] || "#999"}"></span> ${esc(laneName(b.lane))} · ${mmss(b.t_begin)}–${mmss(b.t_end)} · ${fmt(b.lo_khz, 1)}–${fmt(b.hi_khz, 1)} kHz`;
+  const rv = b.reviewed === "yes" ? `A reviewer confirmed this call${b.species ? `: ${esc(b.species)}` : ""}.`
+    : b.reviewed === "no" ? "A reviewer said this is not a call of this group."
+    : b.reviewed === "unknown" ? "A reviewer could not tell." : "Not checked by a reviewer yet.";
+  $("binfo").innerHTML = `${esc(b.model)} scored ${fmt(b.max_score, 3)} (threshold ${b.threshold}) over ${b.n} window${b.n === 1 ? "" : "s"}. ${rv}`;
+  $("flagtxt").value = ""; $("flagstat").textContent = ""; $("flag").disabled = false;
+  predict();
+}
+async function predict() {
+  const b = SEL, seq = ++predSeq;
+  $("topwrap").innerHTML = `<span class="small">running ${esc(b.model)} on the box (this can take a few seconds) …</span>`;
+  $("allwrap").hidden = true; $("scorename").textContent = "";
+  try {
+    const p = await api(`api/predict?id=${encodeURIComponent(b.id)}`);
+    if (seq !== predSeq) return;
+    PRED = p; renderTop();
+  } catch (e) { if (seq === predSeq) $("topwrap").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+function topRow(t, k) {
+  const extra = [t.kind, t.ebird].filter(Boolean).join(" · ");
+  return `<tr><td class="k">${k == null ? "" : k + 1}</td>
+    <td><b>${esc(t.name)}</b>${t.common ? ` <span class="cn">· ${esc(t.common)}</span>` : ""}<div class="small">${esc(extra)}</div></td>
+    <td style="width:110px"><span class="score" style="width:${Math.max(2, Math.min(1, Math.max(0, t.score)) * 70)}px"></span> <span class="small">${fmt(t.score, 3)}</span></td>
+    <td style="width:62px">${t.at_s == null ? "" : `<button class="pw" data-at="${t.at_s}" title="play the 5 s window where it scored highest">▶ ${mmss(t.at_s, 0)}</button>`}</td></tr>`;
+}
+function renderTop() {
+  const P = PRED;
+  $("scorename").textContent = `${P.score_name}, ${P.windows.length} window${P.windows.length === 1 ? "" : "s"}`;
+  const L = P.learned || [];
+  const learned = L.length ? `<div class="small">names reviewers gave similar boxes</div>
+    <table class="top">${L.map(t => topRow({...t, kind: `${t.n_boxes} box${t.n_boxes > 1 ? "es" : ""}, ${t.n_recordings} recording${t.n_recordings > 1 ? "s" : ""}`, ebird: "", at_s: null}, null)).join("")}</table>
+    <div class="small" style="margin-top:6px">the model's own top 5</div>` : "";
+  $("topwrap").innerHTML = learned + `<table class="top">${P.top.map((t, k) => topRow(t, k)).join("")}</table>
+    <div class="small" style="margin-top:4px">Scores are the model's guesses, not confirmed identifications.</div>`;
+  if (P.top_all && P.top_all.length) { $("allwrap").hidden = false; $("topall").innerHTML = `<table class="top">${P.top_all.map((t, k) => topRow(t, k)).join("")}</table>`; }
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("button.pw");
+  if (b && REC) { const a = +b.dataset.at; playUrl(`api/view.wav?rec=${encodeURIComponent(REC.id)}&a=${fmt(a, 3)}&b=${fmt(a + 5, 3)}`, a, a + 5); }
+});
+
+const au = $("au");
+let raf = 0;
+function playUrl(url, a, b) {
+  play = {a, b};
+  au.src = url;
+  au.play().catch(() => {});
+  if (!raf) { const tick = () => { draw(); raf = au.paused ? 0 : requestAnimationFrame(tick); }; raf = requestAnimationFrame(tick); }
+}
+au.addEventListener("play", () => { if (!raf) { const tick = () => { draw(); raf = au.paused ? 0 : requestAnimationFrame(tick); }; raf = requestAnimationFrame(tick); } });
+au.addEventListener("ended", () => draw());
+function stopAudio() { au.pause(); play = null; draw(); }
+function playBox(mode) {
+  const b = SEL, pad = 0.5;
+  if (!b) return;
+  const q = new URLSearchParams({id: b.id, t0: fmt(b.t_begin, 3), t1: fmt(b.t_end, 3), lo: fmt(b.lo_khz, 3), hi: fmt(b.hi_khz, 3), pad, mode});
+  playUrl(`api/audio.wav?${q}`, Math.max(0, b.t_begin - pad), b.t_end + pad);
+}
+$("playBox").onclick = () => playBox("band-passed");
+$("playOrig").onclick = () => playBox("original");
+$("playView").onclick = () => {
+  if (!REC) return;
+  if (!au.paused && play && play.view) { stopAudio(); return; }
+  const a = view[0], b = Math.min(view[1], a + META.view_play_s);
+  playUrl(`api/view.wav?rec=${encodeURIComponent(REC.id)}&a=${fmt(a, 3)}&b=${fmt(b, 3)}`, a, b);
+  play.view = true;
+};
+$("flag").onclick = async () => {
+  if (!SEL) return;
+  $("flag").disabled = true;
+  try {
+    await post("api/flag", {id: SEL.id, comment: $("flagtxt").value.slice(0, 500)});
+    $("flagstat").innerHTML = `<span class="ok">Sent, thank you: a reviewer will look at this box.</span>`;
+  } catch (e) { $("flag").disabled = false; $("flagstat").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+};
+document.addEventListener("keydown", e => {
+  if (e.target.matches("input, textarea, select") || e.ctrlKey || e.metaKey || e.altKey || !REC) return;
+  const k = e.key.toLowerCase();
+  if (k === "[" || k === "pageup") gotoMinute(MIN - 1);
+  else if (k === "]" || k === "pagedown") gotoMinute(MIN + 1);
+  else if (k === "p") $("playView").click();
+  else if (k === " " && SEL) { if (au.paused) $("playBox").click(); else stopAudio(); }
+  else return;
+  e.preventDefault();
+});
+
+// ---------------- start ----------------
+(async () => {
+  $("contrast").value = store.get("pub_contrast", "50");
+  const cm = store.get("pub_cmap", "grey");
+  if (CMAPS[cm]) $("cmap").value = cm;
+  try { await refreshMeta(); }
+  catch (e) { $("uploads").innerHTML = `<div class="err">The server did not answer: ${esc(e.message)}</div>`; return; }
+  makeLut();
+  const want = new URLSearchParams(location.search).get("rec");
+  if (want && META.recordings.some(r => r.id === want)) await openRec(want);
+  else if (want) WANT = want;      // still scanning: opened when done
+  else if (META.recordings.length === 1) await openRec(META.recordings[0].id);
+  pollScans();
+})();
+</script>
+</body>
+</html>
