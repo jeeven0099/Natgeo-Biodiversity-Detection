@@ -99,6 +99,7 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
   <div class="lanes" id="lanes"></div>
   <label class="inl" title="cells kept at this share of the way from the box median to its max">κ <input id="kappa" type="number" step="0.05" min="0" max="1" style="width:64px"></label>
   <label class="inl">Reviewer <input id="reviewer" placeholder="your name" style="width:120px"></label>
+  <a id="signout" class="small" href="/authelia/logout" hidden>sign out</a>
   <span class="small" id="logstat"></span>
   <span class="inl" title="download this recording's reviewed boxes as a Raven selection table (.txt), from the log as it is now">
     <button id="exportRaven">export Raven table</button>
@@ -255,6 +256,7 @@ async function init() {
   $("reviewer").value = store.get("reviewer", "");
   if (META.reviewer) {            // the website: the login names the reviewer; the field only shows it
     $("reviewer").value = META.reviewer; $("reviewer").readOnly = true; $("reviewer").title = "signed in as " + META.reviewer;
+    $("signout").hidden = false;     // the website only: the proxy's login service signs out at this address
   }
   // groups ticked before, kept to the page's groups (an old choice can name a lane the page no longer has)
   let on = JSON.parse(store.get("lanes", "null") || "null");
