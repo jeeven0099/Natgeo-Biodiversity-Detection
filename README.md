@@ -643,6 +643,15 @@ inside the app.
   (`review_species.py`). A file that is missing, or whose learner was kept, changes nothing. Restart
   the app after a refit.
 - Needs only `.venv-perch`: stdlib `http.server`, numpy, scipy and PIL. There is no Flask and no CDN.
+- `--survey` lists the survey's own recordings on the review page too. Without it (the default since
+  2026-11-21), only added audio is listed.
+
+**Since 2026-11-21 the review page is simpler** (see
+[Reviewer page cleanup](#reviewer-page-cleanup-2026-11-21)). Groups Insecta, EC-margin and Weather are
+not offered. The list holds model boxes and your boxes, always in the minute view, and the page has
+no Raven boxes and no reset buttons. A box's group is changed with one click. The **Show** ticks, the
+minute-view switch, the Raven toggle and the "Reset to" buttons described below are gone; the server
+items behind them are unchanged.
 
 ![Review app: an EarthChirp insect box with kept cells and EarthChirp's top 5](docs/figures/review_app_ec_cells.png)
 
@@ -790,8 +799,8 @@ Raven and your boxes have no fixed group: the group you pick is logged in `lane`
     logged from Raven itself), `Logged At`, `Log ID`.
   - Raven opens it on the recording's WAV like its own table. Nothing is written on the server; the
     CLI form above writes every recording at once.
-- **Audio editor ↗** (header link): opens the [audio editor](#audio-editor-open-record-cut-and-save-audio)
-  in a new tab.
+- **Upload audio ↗** (header link; "audio editor ↗" before 2026-11-21): opens the
+  [audio editor](#audio-editor-open-record-cut-and-save-audio) in a new tab.
 - **Add audio…** (header button, beside the recording list): uploads an audio file of your own, runs
   the zero-shot model on it and lists it with the dataset's recordings as `<name> · added (<file>)`.
   The status beside the button counts the upload, then the windows scanned. When the scan is done the
@@ -1250,10 +1259,122 @@ The first run found one fault, fixed: after a box was drawn or a pan released, t
 Reruns after these features (2026-11-17): `ui_display.mjs` 32 / 32 and `ui_minute.mjs` 26 / 26, both
 on fresh copies of `data\review`.
 
+### Reviewer page cleanup (2026-11-21)
+
+The reviewer page (local, and `/review/` on the website) asks fewer questions and lets a reviewer
+change a box's group directly.
+
+**Removed from the page:**
+- the groups Insecta, EC-margin and Weather (`REVIEW_HIDDEN_LANES`), so EarthChirp's EC-Insecta is the
+  only insect group;
+- the **Show** ticks. The list holds model boxes, the taxon head's boxes and your own boxes. Your
+  boxes stay so that a box you drew, or a box whose group you changed, does not leave the list. (The
+  taxon head's boxes were left out on the first day; see "Taxon head boxes back" below);
+- the minute-view switch, so the minute view is always on;
+- the Raven toggle under the spectrogram, along with the Raven boxes on the spectrogram and the strip;
+- the "Reset to" buttons, plus the "box edited" note that went with them;
+- the line under the title ("model box … max score … tightened … refiner confidence …") and the
+  "refiner: refined boxes for …" line in the header;
+- the survey's own recordings, unless the app runs with `--survey`. Added audio is always listed.
+
+The public page, the server's items and every learner keep all lanes and sources. `LOG_COLS` did not
+change. Mammalia stays on the review page, since its removal was not asked for.
+
+**Changing a box's group.** Above the question, a **Group** row has one button per group.
+- On a model box, its own group is highlighted. Clicking another group (say Aves on an EC-Insecta
+  box):
+  - marks that group and dashes the model's group;
+  - sets the answer to Yes and asks "Is there a sound of Aves in the box?";
+  - reruns the top 5 for the new group (Perch for Aves);
+  - shows the title as "EC-Insecta → Aves". Clicking the model's group undoes all of this, and the
+    earlier answer returns.
+- Accept then sends `relabel: true` with the new group, and `Store.relabel` logs two ordinary rows,
+  as if done by hand:
+  - a new reviewer box of the new group, with the answer, species and box;
+  - **No** on the model box, with the comment "the call is Aves: logged as new box `<id>`".
+- On a new box, a Raven box or one of your boxes, the buttons set its group, as the drop-down did.
+- A group you log a box in is ticked in the header if it was not already, so the box stays listed.
+
+`review_labels.py` reads the two rows like any others. The model box is a negative for its own
+group, and the new box is a positive for the new group. `review_species` ignores the No row, which
+has no species.
+
+**Tests** (scratch copies of `data\review` and one upload via `--review-dir` and `--uploads-dir`,
+port 8831; the real log was not written):
+
+| Test | Result |
+|---|---|
+| `/api/meta` | lanes Aves, Amphibia, Mammalia, Anthropogenic, EC-Insecta; default on Aves, Amphibia, EC-Insecta, Anthropogenic; recordings: the one upload, no survey recording |
+| Change POST: EC-Insecta model box 0–77.5 s to Aves, yes, *Gallus gallus* | 200; 2 rows: reviewer Aves yes *Gallus gallus* (Aves score 0.861 in the box), then EarthChirp EC-Insecta no with the comment pointing at the new row |
+| `/api/boxes` after | the model box no in EC-Insecta; the new reviewer box listed as Aves yes *Gallus gallus* |
+| Refusals | same group, unknown group ("Fish") and a reviewer box: all 400, 0 rows written |
+| Page (`ui_reviewpage.mjs`, headless Chrome over CDP) | the removed controls are absent (minuteMode, sources, showRaven, the reset buttons, refinestat, edited, lanepick); the lane ticks have no Insecta, EC-margin or Weather; one recording listed; the list holds model and reviewer boxes only; minute view on |
+| Page: model box opened (Amphibia, 285–290 s) | no subtitle; the Group row shows the 5 review groups, Amphibia on, none dashed |
+| Page: click Aves | change set, answer Yes, Amphibia dashed, title "Amphibia → Aves", question "Is there a sound of Aves in the box?", top 5 rerun with Perch probability |
+| Page: click Amphibia | change undone, answer back to blank |
+| Page: Mammalia, Accept | 2 rows (reviewer Mammalia yes, then the Perch Amphibia box no); the list shows the model box as no and the Mammalia box; change cleared |
+| Page: new box | no group dashed; a click sets its group (Mammalia) |
+| JS exceptions | none |
+| Total | 19 checks, all pass |
+
+The first page run found one fault, now fixed. The box went to Mammalia, which is not ticked by
+default, so the new box was missing from the list. Accept now ticks the box's group. `ruff`:
+`review_app.py` is clean.
+
+**Look (same day).** The header link to the audio editor now reads "upload audio ↗". Behind the
+page sits a faint yellow frame, the National Geographic border drawn in CSS (`body::before`, no
+image file). Its glow brightens and fades over 9 s; the animation stops under
+`prefers-reduced-motion`, and the frame takes no clicks. In dark mode the cards and header are 84%
+opaque so the frame shows faintly through them. The spectrogram canvas stays opaque. Checked by a
+headless Chrome screenshot on the scratch copy: the frame's top edge shows behind the header and its
+sides through the control panels, and the spectrogram is unaffected.
+
+**Taxon head boxes back (2026-11-22).** After the cleanup, bird detection looked much weaker on the
+added audio. The cause was the list, not the models. The cleanup fixed the list to model and reviewer
+boxes (`SOURCES_SHOWN`). That hid the "taxon check" source, which reviewers had kept ticked: 38 log
+rows on the uploads up to 2026-11-19 answer taxon head boxes. Perch's Aves group probability is high
+almost everywhere, so the 0.94 threshold keeps a narrow top band. The uploads come from other sites
+(S01623, S01626, S01632) than the survey (S01634) and score lower:
+
+| | median prob_Aves | Aves model boxes at 0.94 |
+|---|---|---|
+| survey, per recording | 0.88 | median 11 (10th percentile 0.3) |
+| S01623_20250221_160000 | 0.83 | 10 |
+| S01623_20250306_132000 | 0.88 | 2 |
+| S01626_20250310_064000 | 0.92 | 37 |
+| S01632_20250327_184000 | 0.73 (max 0.91) | 0 |
+
+The taxon head finds the Aves runs the threshold misses. In minute 1 of S01623_20250221_160000 it
+finds 5–12.5 s and 20–32.5 s, where every Perch window scores 0.76–0.91. `SOURCES_SHOWN` is now
+model, taxon and reviewer. A taxon head box is tagged "taxon head p=…" and its group changes like a
+model box's: `Store.relabel` refuses only Raven, reviewer and audit boxes.
+
+Checks behind the diagnosis (nothing written):
+- `scan_audio.py --check 2` reproduces the survey caches: prob diff 1.1e-16, model boxes 197 vs 197.
+  The upload scan path is not the cause.
+- The thresholds did not change: the app uses `pv.THRESHOLDS`, Aves 0.94.
+- The taxon head on the uploads' reviewed Aves boxes (uploads are outside its training data). It
+  scores its own 16 boxes at or above the cut of 0.39; reviewers said yes to 15. It scores 9 of the 21
+  other confirmed birds (Perch, below-threshold and reviewer boxes) below the cut, mostly in
+  S01626_20250310_064000 at 187–300 s and 600–650 s. On S01632_20250327_184000 it marks 83% of
+  segments, against a survey median of 27% (10–90%: 4–67%).
+
+| Test (`ui_reviewpage.mjs`, scratch copies, port 8831) | Result |
+|---|---|
+| List sources | model, reviewer and taxon only |
+| Taxon head boxes | 48 sent for the ticked groups, 48 listed; the Aves boxes of minute 1 start at 5 s and 20 s |
+| Taxon head box opened | its list row carries the "taxon head" tag |
+| Taxon head box (Anthropogenic, 10–17.5 s) changed to Aves, Accept | 2 rows: reviewer Aves yes, then the taxon head Anthropogenic box no |
+| Earlier checks (removed controls, lanes, group change, new box, JS errors) | unchanged, pass |
+| Total | 24 checks, all pass |
+
+The test now starts Chrome with `--remote-debugging-port=0` and an absolute profile path, and reads
+the port from `DevToolsActivePort`. On 2026-11-22 a fixed port (9334) never came up on this laptop.
+
 ## Audio editor: open, record, cut and save audio
 
 `scripts/review_editor.html`, served by the review app at http://127.0.0.1:8765/editor (the
-"audio editor ↗" link in its header opens it in a new tab). A small editor for your own audio files:
+"upload audio ↗" link in its header opens it in a new tab). A small editor for your own audio files:
 open or record a file, look at its spectrogram, cut / copy / paste / delete, and save the result.
 It runs entirely in the browser tab, and its normal output is the WAV you save, as a download. The
 one exception is **detect calls**, which sends the file to the review app on purpose (below).
@@ -1591,7 +1712,7 @@ after it was stored.
    | Path | Size |
    |---|---|
    | `scripts\*.py`, `scripts\*.html`, `config\` | 4 MB |
-   | `external\bacpipe_model_checkpoints\perch_v2\perch_v2_no_dft.onnx` and `labels.txt` | 394 MB |
+   | `external\bacpipe_model_checkpoints\perch_v2\perch_v2_no_dft.onnx` (no other file there is read) | 394 MB |
    | `external\earthchirp_lib\` (`global_reflib_protos.npy`, `global_reflib_index.parquet`, `LICENSE.txt`) | 16 MB |
    | `data\perch_windows\perch_cell_head.onnx` | 347 MB |
    | `data\perch_windows\earthchirp_embeddings.npy`, `cell_maps.npy` | 189 + 63 MB |
@@ -1599,6 +1720,13 @@ after it was stored.
    | `data\insecta_compare\esc50_emb.npy`, `esc50_meta.csv` | 12 MB |
    | `data\review\calibration\` (the adopted learners) | 57 MB |
 
+   `deploy/setup_server.sh` does steps 2 and the Python install in one go on Ubuntu:
+   `sudo bash setup_server.sh <zip of the files above>`. It installs `python3-venv git unzip`,
+   adds a 2 GB swap file when there is none, creates the `natgeo` user, clones this repo into
+   `/srv/natgeo` (or pulls), unzips without overwriting files already there (so a re-run never
+   rolls back the server's reviews), builds `.venv-perch` with numpy 2.4.6, pandas 2.3.3, pyarrow
+   25.0.1, scipy 1.17.1, scikit-learn 1.9.1, soundfile 0.14.0 and onnxruntime 1.22.0, installs and
+   starts the service, and checks that `/api/meta` answers with `can_add` true.
 2. **The app:** `deploy/callfinder.service` runs
    `python -X utf8 scripts/review_app.py --public --device cpu --no-browser --port 8765` as user
    `natgeo` in `/srv/natgeo`, restarting on failure. Copy it to `/etc/systemd/system/`.
@@ -1612,8 +1740,12 @@ after it was stored.
 this public repo, as do `data\review` (it holds reviewers' names) and `data\uploads`. The deploy has
 been run only as a server-shaped copy on this laptop (below), not yet on a Linux server.
 
-On CPU a scan runs at about 2.7 windows/s (8 windows in 3.0–3.5 s on the laptop), so a 60-minute
-upload takes about 9 minutes; the page shows the queue position and "detecting calls: n/N windows".
+On the laptop's CPU, a 59.5-minute 48 kHz stereo WAV (654 MB, just under both limits) scanned
+1,428 windows in 1,813 s (0.79 windows/s, about 30 minutes); short clips run faster (8 windows in
+3.0–8.5 s). Scans run one at a time, and the page shows the queue position and "detecting calls:
+n/N windows". The app's peak working set during that scan was 2.0 GB (1.8 GB at rest after
+start), measured on Windows, so a 4 GB server should be checked with `free -m` during its first
+long scan.
 
 ### Tests
 
@@ -1664,6 +1796,19 @@ the test uploads), run on CPU:
   false; an upload is refused at once (400, no type prefix) and nothing is stored.
 - **With them:** `ui_public.mjs` 48/48. Three scans of 8 windows took 3.0–3.5 s each, with Perch and
   the cell head on `CPUExecutionProvider`.
+- **Reviewer side with no survey audio:** `/review/api/meta` lists 0 recordings, so survey
+  recordings without their WAV are left out rather than shown broken; a survey recording's items
+  and spectrogram are 404 and its audio 400. Uploads, and any survey WAV copied in, are listed.
+- **Long upload:** the 59.5-minute file above, 1,428 windows in 1,813 s, 352 model boxes, peak
+  working set 2.0 GB.
+
+**On Linux** (WSL Ubuntu 24.04.3, Python 3.12.3: the server's versions). The pinned packages were
+downloaded as Linux wheels (all seven exist for cp312 manylinux x86_64) and installed offline in a
+fresh venv; they import, with onnxruntime 1.22.0 on `CPUExecutionProvider` and libsndfile 1.2.2.
+`review_app.py --public --device cpu` on the server-shaped copy starts, `can_add` is true, an upload
+of clip A scans 8 windows in 1.9 s with 4 model boxes (as on Windows), the reviewer page is 200
+with `X-Reviewer` and 403 without, and the process holds 1,986 MB (RSS) after the scan.
+`setup_server.sh` passes `bash -n`; it has not yet run on the server itself.
 
 **Unchanged elsewhere.** The local review app's links became relative so they work under
 `/review/`; the earlier suites, rerun in local mode, all pass: `ui_display` 32/32, `ui_minute` 26/26,
@@ -2810,7 +2955,7 @@ scripts/              Perch / EarthChirp zero-shot pipeline (this page)
     build_common_names.py    English common names (eBird + GBIF) -> config/common_names.csv
 config/               Perch class index, taxonomy, target list, common names
 jobs/                 SLURM job for GPU extraction
-deploy/               website: Caddyfile (HTTPS + reviewer login) and a systemd unit (placeholders only)
+deploy/               website: Caddyfile (HTTPS + reviewer login), a systemd unit, setup_server.sh
 notebooks/            perch_zeroshot_viewer.ipynb (the viewer)
 docs/figures/         README figures
 data/                 manifest.csv, splits.csv, zeroshot_report.csv (caches are git-ignored)

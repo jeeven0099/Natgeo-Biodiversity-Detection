@@ -8,17 +8,26 @@
 :root {
   --bg: #f6f6f3; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #dcdcd6;
   --accent: #2458c6; --yes: #23863a; --no: #c0392b; --unk: #a07800; --sel: #e8eefb;
+  --card: var(--panel); --frame: 255, 204, 0; --frame-a: .10;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #161615; --panel: #20201e; --ink: #ecece8; --muted: #9b9b94; --line: #3a3a36;
     --accent: #7ea3f2; --yes: #4cc26a; --no: #ef6b5e; --unk: #e0b43c; --sel: #27324a;
+    --card: rgba(32, 32, 30, .84); --frame-a: .22;
   }
 }
 * { box-sizing: border-box; }
 body { margin: 0; font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+/* the yellow frame behind the page: faint, glowing slowly; it takes no clicks */
+body::before { content: ""; position: fixed; left: 50%; top: 52%; height: 72vh; aspect-ratio: 0.72;
+  transform: translate(-50%, -50%); border: 4.6vh solid rgba(var(--frame), .9); border-radius: 2px;
+  box-shadow: 0 0 9vh 1.5vh rgba(var(--frame), .55), inset 0 0 9vh 1vh rgba(var(--frame), .4);
+  opacity: var(--frame-a); pointer-events: none; z-index: -1; animation: frameGlow 9s ease-in-out infinite; }
+@keyframes frameGlow { 50% { opacity: calc(var(--frame-a) * 1.6); } }
+@media (prefers-reduced-motion: reduce) { body::before { animation: none; } }
 header { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 8px 14px;
-  background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+  background: var(--card); backdrop-filter: blur(2px); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
 header h1 { font-size: 15px; margin: 0 6px 0 0; }
 label.inl { display: inline-flex; gap: 5px; align-items: center; }
 select, input, textarea, button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
@@ -32,7 +41,7 @@ button:disabled { opacity: .45; cursor: default; }
 .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
 main { display: grid; grid-template-columns: 290px 1fr; gap: 12px; padding: 12px 14px; }
 @media (max-width: 900px) { main { grid-template-columns: 1fr; } #list { max-height: 260px; } }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 #list { overflow-y: auto; max-height: calc(100vh - 90px); padding: 0; }
 #list .row { display: grid; grid-template-columns: 18px 1fr auto; gap: 6px; padding: 5px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
 #list .row:hover { background: var(--sel); }
@@ -74,6 +83,10 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
 .hdrlab { font-weight: 600; margin-right: 2px; }
 #list .minhead { padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--sel); position: sticky; top: 0; z-index: 1; }
 #list .empty { padding: 10px; }
+.grp { display: inline-flex; flex-wrap: wrap; gap: 5px; }
+.grp button { display: inline-flex; gap: 5px; align-items: center; }
+.grp button.on { background: var(--sel); border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: -1px; font-weight: 600; }
+.grp button.model { border-style: dashed; }
 </style>
 </head>
 <body>
@@ -83,17 +96,14 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
   <span class="inl" id="addWrap" title="add an audio file of your own: the zero-shot model detects calls on it, then it joins this list (stored in data/uploads; its answers are logged, the learners leave it out)">
     <button id="addAudio">add audio…</button><input type="file" id="addFile" accept="audio/*,.wav,.flac,.ogg,.mp3,.aif,.aiff" hidden>
     <span class="small" id="addstat"></span></span>
-  <label class="inl" title="show the recording a minute at a time; the list holds only that minute's boxes"><input type="checkbox" id="minuteMode"> minute view</label>
   <div class="lanes" id="lanes"></div>
-  <div class="lanes" id="sources" title="which kinds of item the list shows"></div>
   <label class="inl" title="cells kept at this share of the way from the box median to its max">κ <input id="kappa" type="number" step="0.05" min="0" max="1" style="width:64px"></label>
   <label class="inl">Reviewer <input id="reviewer" placeholder="your name" style="width:120px"></label>
   <span class="small" id="logstat"></span>
-  <span class="small" id="refinestat"></span>
   <span class="inl" title="download this recording's reviewed boxes as a Raven selection table (.txt), from the log as it is now">
     <button id="exportRaven">export Raven table</button>
     <select id="exportKeep"><option value="yes">yes only</option><option value="all">every answer</option></select></span>
-  <a id="editorLink" href="editor" target="_blank" rel="noopener" title="open, record and cut audio files of your own; nothing there is logged">audio editor ↗</a>
+  <a id="editorLink" href="editor" target="_blank" rel="noopener" title="open, record and cut audio files of your own and send them in to be scanned; nothing there is logged">upload audio ↗</a>
 </header>
 <main>
   <div class="card" id="list"></div>
@@ -116,7 +126,6 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
         <button id="zoomIn" title="zoom in">+</button><button id="panR" title="pan right">▶</button>
         <button id="viewBox">fit box</button>
         <label class="inl">to <select id="fview"><option>4</option><option>8</option><option>12</option><option selected>16</option><option>24</option></select> kHz</label>
-        <label class="inl"><input type="checkbox" id="showRaven" checked> Raven boxes</label>
         <label class="inl"><input type="checkbox" id="showCells" checked> kept cells</label>
         <button id="newbox" title="draw a box around a call the list does not have (B)">＋ new box <kbd>B</kbd></button>
         <button id="cancelNew" style="display:none" title="back to the item you were on (Esc)">cancel new box</button>
@@ -160,10 +169,11 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
         </div>
       </div>
       <div class="card" id="deccard">
-        <div class="bar" id="lanerow" style="margin-top:0; margin-bottom:6px; display:none">
-          <b>Group</b> <select id="lanepick"></select><span class="small" id="lanenote"></span>
+        <div id="lanerow" style="margin-bottom:8px; display:none">
+          <div class="bar grp" style="margin-top:0"><b>Group</b> <span id="lanebtns" class="grp"></span></div>
+          <div class="small" id="lanenote" style="margin-top:4px"></div>
         </div>
-        <b>Is there a sound of this box's group in the box?</b>
+        <b id="question">Is there a sound of this box's group in the box?</b>
         <div class="bar dec">
           <button data-d="yes" class="yes">Yes <kbd>Y</kbd></button>
           <button data-d="no" class="no">No <kbd>N</kbd></button>
@@ -173,11 +183,6 @@ kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3p
           <b>Box</b> <span id="boxtxt">–</span>
           <span class="small">(drawn on the spectrogram)</span>
           <button id="repredict" title="rerun the model's top 5 on the box as drawn now">top 5 for this box</button>
-        </div>
-        <div class="bar" id="resetbar">
-          <span class="small">Reset to</span>
-          <button id="resetRefined" style="display:none">refined box</button><button id="resetTight">tightened box</button><button id="resetFull">model box</button>
-          <span class="small" id="edited"></span>
         </div>
         <div style="margin-top:8px"><textarea id="comment" placeholder="comment (optional)"></textarea></div>
         <div class="bar">
@@ -231,7 +236,7 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", 
 const store = {get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
                set(k, v) { try { localStorage.setItem(k, v); } catch {} }};
 
-let META = null, ALL = [], BOXES = [], cur = -1, BOX = null, PRED = null, RAVEN = [];
+let META = null, ALL = [], BOXES = [], cur = -1, BOX = null, PRED = null;
 let PARENT = null, predSeq = 0;   // PARENT: the item to return to after a new box
 let view = [0, 10], img = null, imgView = null, fmaxPng = 24;
 let acc = null;                 // accepted box [t0, t1, lo, hi]
@@ -240,6 +245,7 @@ let clipStart = 0, drag = null;
 let playing = "", playEnd = 0;  // what the audio element holds: "view", "box" or ""; where a view clip ends
 let cursor = null;              // {rec, t}: where 'play view' starts (set on the time axis)
 let MIN = 0;                    // minute view: the minute shown, 0-based
+let CHG = "", preChg = "";      // a model box's call put in another group (logged as No + a new box); the answer before
 
 // ---------------- setup ----------------
 async function init() {
@@ -250,16 +256,14 @@ async function init() {
   if (META.reviewer) {            // the website: the login names the reviewer; the field only shows it
     $("reviewer").value = META.reviewer; $("reviewer").readOnly = true; $("reviewer").title = "signed in as " + META.reviewer;
   }
-  $("minuteMode").checked = store.get("minuteMode", "1") === "1";
-  const on =JSON.parse(store.get("lanes", "null") || "null") || META.default_on;
+  // groups ticked before, kept to the page's groups (an old choice can name a lane the page no longer has)
+  let on = JSON.parse(store.get("lanes", "null") || "null");
+  on = Array.isArray(on) ? on.filter(g => META.lanes.includes(g)) : [];
+  if (!on.length) on = META.default_on;
   $("lanes").innerHTML = META.lanes.map(g =>
     `<label><input type="checkbox" value="${g}" ${on.includes(g) ? "checked" : ""}><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${g} <span class="small">≥${META.thresholds[g]}</span></label>`).join("");
-  const son = JSON.parse(store.get("sources", "null") || "null") || META.default_sources;
-  $("sources").innerHTML = `<span class="hdrlab">Show</span>` + Object.entries(META.sources).map(([s, label]) =>
-    `<label><input type="checkbox" value="${s}" ${son.includes(s) ? "checked" : ""}>${label}</label>`).join("");
   $("auditgroups").innerHTML = META.audit_groups.map(g =>
     `<label><input type="checkbox" value="${g}" checked><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${g}</label>`).join("");
-  $("lanepick").innerHTML = `<option value="">pick the group …</option>` + META.lanes.map(g => `<option value="${g}">${g}</option>`).join("");
   fillRecs();
   $("addWrap").hidden = !META.can_add;
   // ?rec= (the editor's link to a file it added) opens that recording once, then leaves the address
@@ -278,7 +282,14 @@ async function init() {
   await loadRec(wanted ? "" : store.get("boxid", ""));
 }
 function lanesOn() { return [...$("lanes").querySelectorAll("input:checked")].map(x => x.value); }
-function sourcesOn() { return [...$("sources").querySelectorAll("input:checked")].map(x => x.value); }
+function tickLane(g) {
+  const x = [...$("lanes").querySelectorAll("input")].find(x => x.value === g);
+  if (x && !x.checked) { x.checked = true; store.set("lanes", JSON.stringify(lanesOn())); }
+}
+// the list: model boxes, the taxon head's finds (calls a group's threshold misses; tagged "taxon head"),
+// and the boxes you drew (a new box, or a model box whose group you changed)
+const SOURCES_SHOWN = ["model", "taxon", "reviewer"];
+const sourcesOn = () => SOURCES_SHOWN;
 function fillRecs() {
   const on = lanesOn(), v = $("rec").value;
   $("rec").innerHTML = META.recordings.map(r => {
@@ -292,7 +303,7 @@ function logStat() {
   $("logstat").textContent = `${META.n_logged} rows in ${META.log_file} · ${META.n_audit_complete} audit windows complete`;
 }
 // ---------------- minute view ----------------
-const minuteMode = () => $("minuteMode").checked;
+const minuteMode = () => true;     // the page shows a minute at a time, always
 const recInfo = () => META.recordings.find(r => r.id === $("rec").value) || META.recordings[0];
 const recDur = () => recInfo().duration_s;
 const nMinutes = () => Math.max(1, Math.ceil(recDur() / META.minute_s - 1e-9));
@@ -333,7 +344,7 @@ function emptyMinute() {
   showCard(false);
   $("title").textContent = `${minuteLabel()} · ${ri.id}`;
   $("subtitle").textContent = " nothing listed in this minute: drag on the spectrogram around a call to add it";
-  $("lanerow").style.display = "none"; $("resetbar").style.display = "none";
+  CHG = ""; renderLanes();
   $("topwrap").innerHTML = `<span class="small">Draw a box to see the model's top 5.</span>`;
   $("allwrap").style.display = "none"; $("scorename").textContent = "";
   $("hist").innerHTML = ""; $("msg").textContent = ""; $("comment").value = "";
@@ -349,7 +360,6 @@ function minNav() {
 $("minPrev").onclick = () => gotoMinute(MIN - 1);
 $("minNext").onclick = () => gotoMinute(MIN + 1);
 $("minFit").onclick = () => setView(minuteRange());
-$("minuteMode").onchange = () => { store.set("minuteMode", minuteMode() ? "1" : "0"); loadRec(curId()); };
 
 const isAudit = () => BOX && BOX.source === "audit";
 const needsLane = () => BOX && (BOX.new || BOX.lane_editable);
@@ -368,7 +378,6 @@ async function loadRec(startId, minute) {
   finally { recWait--; }
   if (seq !== recSeq) return;
   ALL = all;
-  loadRavenAll($("rec").value);
   scheduleRefine();
   if (minuteMode()) {
     // the minute last shown is kept while the box (if any) lies in it: a tick never jumps to a long box's start
@@ -402,14 +411,11 @@ function filterBoxes() {
     || (a.source === "taxon" ? b.taxon_p - a.taxon_p : a.taxon_p - b.taxon_p));
   return out;
 }
-// the server refines a recording's boxes in the background: refresh confidence until it is done
+// the server refines a recording's boxes in the background: refresh the list's "box uncertain" tags until it is done
 let refineTimer = null;
 function scheduleRefine() {
   clearTimeout(refineTimer);
-  const todo = ALL.filter(b => b.refine_pending).length, all = ALL.filter(b => b.refine_pending || b.refine_conf != null).length;
-  $("refinestat").textContent = !META.refiner ? "" : todo ? `refining boxes ${all - todo}/${all} …`
-    : `refiner: ${META.refiner.adopted.length ? "refined boxes for " + META.refiner.adopted.join(", ") : "none adopted yet"}`;
-  if (todo) refineTimer = setTimeout(refreshRefine, 3000);
+  if (ALL.some(b => b.refine_pending)) refineTimer = setTimeout(refreshRefine, 3000);
 }
 async function refreshRefine() {
   const rec = $("rec").value, kap = $("kappa").value;
@@ -464,36 +470,41 @@ function showCard(audit) {
     : minuteMode() ? "<b>Edit the box:</b> drag an edge or corner of the yellow box, or drag inside it to redraw it. A drag begun outside it boxes a new call."
     : "<b>Draw the box:</b> drag on the spectrogram. Drag an edge or corner of the yellow box to adjust it.";
 }
-function setupLane() {
-  $("lanerow").style.display = needsLane() ? "" : "none";
-  if (!needsLane()) return;
-  $("lanepick").value = BOX.lane || "";
-  $("lanenote").textContent = BOX.new ? " the group of the call you box"
-    : BOX.source === "raven" ? ` Raven says ${BOX.label}; change it if the call is another group` : " change it if the call is another group";
+// the group the answer is for: a drawn (or Raven) box's own, else the model's or the one it was changed to
+const laneNow = () => !BOX ? "" : needsLane() ? BOX.lane : CHG || BOX.lane;
+// group buttons: on a drawn box they set its group; on a model box another group means the call is of that
+// group: Accept then logs No on the model box and the box as a new box of the picked group (Store.relabel)
+function renderLanes() {
+  const show = !!BOX && !isAudit();
+  $("lanerow").style.display = show ? "" : "none";
+  if (!show) { $("question").textContent = "Is there a sound of this box's group in the box?"; return; }
+  const now = laneNow(), model = needsLane() ? "" : BOX.lane;
+  $("lanebtns").innerHTML = META.lanes.map(g =>
+    `<button data-lane="${esc(g)}" class="${g === now ? "on" : ""}${CHG && g === model ? " model" : ""}"
+       title="${g === model ? "the model's group" : "the call is " + esc(g)}"><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${esc(g)}</button>`).join("");
+  $("lanenote").innerHTML = BOX.new ? (BOX.lane ? "" : "Pick the group of the call you box.")
+    : CHG ? `The model said <b>${esc(model)}</b>. Accept logs its box as <b>No</b> and this box as a new <b>${esc(CHG)}</b> box with your answer below; click ${esc(model)} to undo.`
+    : needsLane() ? "" : "The model's group. If the call is of another group, click that group.";
+  $("question").textContent = now ? `Is there a sound of ${now} in the box?` : "Is there a sound of this box's group in the box?";
 }
-$("lanepick").onchange = () => {
-  BOX.lane = $("lanepick").value; BOX.predictor = BOX.lane ? predictorOf(BOX.lane) : null;
-  if (BOX.new && BOX.lane) store.set("newlane", BOX.lane);
-  setTitle(); renderDecision(); draw(); predict();
-};
+$("lanebtns").addEventListener("click", e => {
+  const b = e.target.closest("button[data-lane]");
+  if (!b || !BOX || isAudit()) return;
+  const g = b.dataset.lane;
+  if (needsLane()) {
+    BOX.lane = g; BOX.predictor = predictorOf(g);
+    if (BOX.new) store.set("newlane", g);
+  } else {
+    const was = CHG;
+    CHG = g === BOX.lane ? "" : g;
+    if (CHG && !was) { preChg = decision; decision = "yes"; }   // changing the group says the call is there
+    else if (!CHG && was) decision = preChg;
+  }
+  stopAudio(); setTitle(); renderLanes(); renderDecision(); draw(); predict();
+});
 function setTitle() {
   if (BOX.new) { $("title").textContent = `New box · ${BOX.recording}`; return; }
-  $("title").textContent = `${BOX.lane || "group?"} #${BOX.n} · ${BOX.recording}`;
-}
-function subtitle() {
-  const sc = BOX.max_score == null ? "–" : fmt(BOX.max_score, 3);
-  const tight = BOX.tightened ? ` · tightened ${fmt(BOX.t_begin)}–${fmt(BOX.t_end)} s, ${fmt(BOX.lo_khz)}–${fmt(BOX.hi_khz)} kHz` : " · no cell map: full band";
-  if (BOX.source === "model") return ` model box ${fmt(BOX.begin_s, 1)}–${fmt(BOX.end_s, 1)} s, max score ${sc} (threshold ${BOX.threshold})` + tight;
-  if (BOX.source === "near") return ` below threshold: ${fmt(BOX.begin_s, 1)}–${fmt(BOX.end_s, 1)} s, max score ${sc} (threshold ${BOX.threshold}; this band starts at ${fmt(META.near_low[BOX.lane], 4)})` + tight;
-  if (BOX.source === "raven") return ` Raven box “${BOX.label}” ${fmt(BOX.begin_s)}–${fmt(BOX.end_s)} s, ${fmt(BOX.lo_khz)}–${fmt(BOX.hi_khz)} kHz: not matched to a model box of its group (time IoU ≥ 0.3)` +
-    (BOX.lane ? ` (max ${BOX.lane} score here ${sc})` : "");
-  return ` your box ${fmt(BOX.t_begin)}–${fmt(BOX.t_end)} s, ${fmt(BOX.lo_khz)}–${fmt(BOX.hi_khz)} kHz (max ${BOX.lane} score here ${sc})`;
-}
-function refineNote() {
-  if (BOX.refine_conf == null) return "";
-  if (!BOX.refinable) return " · refiner: box too long to refine";
-  return ` · refiner confidence ${fmt(BOX.refine_conf, 2)}${BOX.uncertain ? " (box uncertain)" : ""}` +
-    (BOX.refined ? " · opened on the refined box (dotted)" : "");
+  $("title").textContent = `${CHG ? `${BOX.lane} → ${CHG}` : BOX.lane || "group?"} #${BOX.n} · ${BOX.recording}`;
 }
 
 // ---------------- one box ----------------
@@ -513,12 +524,9 @@ async function select(i) {
   showCard(false);
   const L = BOX.latest;
   if (L && BOX.lane_editable) { BOX.lane = L.lane; BOX.predictor = predictorOf(L.lane); }
-  setTitle(); setupLane();
-  $("subtitle").textContent = subtitle() + refineNote();
-  $("resetbar").style.display = "";
-  $("resetTight").textContent = {model: "tightened box", near: "tightened box", raven: "Raven box", reviewer: "box as first drawn"}[BOX.source];
-  $("resetFull").style.display = BOX.source === "model" || BOX.source === "near" ? "" : "none";
-  $("resetRefined").style.display = BOX.refined ? "" : "none";
+  CHG = "";
+  setTitle(); renderLanes();
+  $("subtitle").textContent = "";
   if (L) {
     decision = L.decision;
     const names = L.species ? L.species.split("; ") : [], src = L.species_source ? L.species_source.split("; ") : [];
@@ -601,9 +609,9 @@ function startNew() {
          duration_s: base.duration_s, fmax_khz: base.fmax_khz, history: [], latest: null, kept_rects: [],
          tightened: false, audit_window: base.source === "audit" ? [base.begin_s, base.end_s] : base.audit_window || null};
   decision = "yes"; species = []; acc = null; PRED = null; predSeq++;
-  showCard(false); setTitle(); setupLane();
+  CHG = "";
+  showCard(false); setTitle(); renderLanes();
   $("subtitle").textContent = " a box the list does not have: drag around the call, pick its group, Accept";
-  $("resetbar").style.display = "none";
   $("topwrap").innerHTML = `<span class="small">Draw the box to see the model's top 5.</span>`;
   $("allwrap").style.display = "none"; $("scorename").textContent = "";
   $("comment").value = ""; $("hist").innerHTML = "new box";
@@ -653,8 +661,6 @@ async function loadSpec() {
   const im = new Image();
   im.onload = () => { if (want === specKeyNow()) { img = im; imgView = [a, b]; colourise(); dispNote(); draw(); } };
   im.src = `api/spec.png?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}&n=${n}`;
-  try { RAVEN = await api(`api/raven?rec=${encodeURIComponent(rec)}&a=${a}&b=${b}`); } catch { RAVEN = []; }
-  draw();
 }
 
 // ---------------- display: the PNG is grey dB (0 = the view's top, 255 = META.spec_range_db below) ----------------
@@ -726,15 +732,17 @@ async function predict() {
   if (!BOX || isAudit()) return;
   const seq = ++predSeq;
   if (!acc) { $("topwrap").innerHTML = `<span class="small">Draw the box to see the model's top 5.</span>`; return; }
-  if (!BOX.lane) { PRED = null; $("topwrap").innerHTML = `<span class="small">Pick the box's group to see the model's top 5.</span>`; $("allwrap").style.display = "none"; return; }
-  const id = BOX.id, lane = BOX.lane, t0 = acc[0], t1 = acc[1];
+  const lane = laneNow();
+  if (!lane) { PRED = null; $("topwrap").innerHTML = `<span class="small">Pick the box's group to see the model's top 5.</span>`; $("allwrap").style.display = "none"; return; }
+  const id = BOX.id, t0 = acc[0], t1 = acc[1];
   $("topwrap").innerHTML = `<span class="small">running ${predictorOf(lane)} on the windows of ${fmt(t0)}–${fmt(t1)} s …</span>`;
   $("allwrap").style.display = "none";
-  const q = new URLSearchParams({id, kappa: $("kappa").value, t0: fmt(t0, 2), t1: fmt(t1, 2), lo: fmt(acc[2], 3), hi: fmt(acc[3], 3)});
-  if (BOX.new) { q.set("rec", BOX.recording); q.set("lane", lane); } else if (BOX.lane_editable) q.set("lane", lane);
+  // a changed group asks as for a new box of that group: the model box's own id would pin its old group
+  const q = new URLSearchParams({id: CHG ? "new" : id, kappa: $("kappa").value, t0: fmt(t0, 2), t1: fmt(t1, 2), lo: fmt(acc[2], 3), hi: fmt(acc[3], 3)});
+  if (BOX.new || CHG) { q.set("rec", BOX.recording); q.set("lane", lane); } else if (BOX.lane_editable) q.set("lane", lane);
   try {
     const p = await api(`api/predict?${q}`);
-    if (!BOX || BOX.id !== id || BOX.lane !== lane || seq !== predSeq) return;
+    if (!BOX || BOX.id !== id || laneNow() !== lane || seq !== predSeq) return;
     PRED = p; renderTop();
   } catch (e) { if (seq === predSeq) $("topwrap").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
@@ -829,18 +837,11 @@ function renderDecision() {
 }
 document.querySelectorAll(".dec button").forEach(b => b.addEventListener("click", () => { decision = b.dataset.d; renderDecision(); }));
 function syncFields() {
-  if (!acc) { $("boxtxt").textContent = "– (not drawn yet)"; $("edited").textContent = ""; return; }
+  if (!acc) { $("boxtxt").textContent = "– (not drawn yet)"; return; }
   $("boxtxt").textContent = `${fmt(acc[0])}–${fmt(acc[1])} s · ${fmt(acc[2])}–${fmt(acc[3])} kHz` +
     `  (${fmt(acc[1] - acc[0])} s × ${fmt(acc[3] - acc[2])} kHz)`;
-  if (BOX.new) { $("edited").textContent = ""; return; }
-  const t = BOX.refined || [BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz];
-  $("edited").textContent = acc.some((x, k) => Math.abs(x - t[k]) > 1e-3)
-    ? `box edited (differs from the ${BOX.refined ? "refined box" : $("resetTight").textContent})` : "";
 }
 function setBox(b) { stopAudio(); $("playnote").textContent = ""; acc = b; syncFields(); renderDecision(); draw(); }
-$("resetRefined").onclick = () => { if (BOX.refined) setBox(BOX.refined.slice()); };
-$("resetTight").onclick = () => setBox([BOX.t_begin, BOX.t_end, BOX.lo_khz, BOX.hi_khz]);
-$("resetFull").onclick = () => setBox([BOX.begin_s, BOX.end_s, 0.06, 16.0]);
 $("repredict").onclick = () => predict();
 
 // ---------------- accept ----------------
@@ -855,11 +856,22 @@ async function accept() {
     learned: PRED && PRED.learned ? PRED.learned.map(t => ({name: t.name})) : [], learned_control: !!(PRED && PRED.learned_control)};
   if (needsLane()) body.lane = BOX.lane;
   if (BOX.new) { body.new = true; body.recording = BOX.recording; delete body.id; }
+  if (CHG) { body.relabel = true; body.lane = CHG; }
   try {
     const row = await api("api/log", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-    META.n_logged += 1; logStat();
+    META.n_logged += CHG ? 2 : 1; logStat();
+    tickLane(row.lane);                // a box just logged in an unticked group would leave the list
     const r = META.recordings.find(r => r.id === BOX.recording);
     const said = `logged ${row.log_id} (${row.lane}, ${row.decision}${row.species ? ", " + row.species : ""})`;
+    if (CHG) {                         // the model box is now a No, and the call a new box of the picked group
+      const it = BOXES[cur], open = !it.decision, from = BOX.lane;
+      r.reviewed += 1 + open; fillRecs();
+      CHG = "";
+      await loadRec(it.id, MIN);
+      $("msg").textContent = `logged ${row.model_row.log_id} (the ${from} box: no) and new box ${row.log_id} (${row.lane}, ${row.decision}${row.species ? ", " + row.species : ""})`;
+      if ($("advance").checked) nextUnreviewed();
+      return;
+    }
     if (BOX.new) {                     // back to where the box was drawn from, with the box in the list
       r.reviewed += 1; fillRecs();
       await loadRec(PARENT || row.id, minuteMode() ? MIN : undefined);
@@ -915,7 +927,7 @@ function draw() {
     ctx.restore();
   }
   ctx.save(); ctx.beginPath(); ctx.rect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0); ctx.clip();
-  const col = (BOX && META.colors[BOX.lane]) || "#e6194b";
+  const col = (BOX && META.colors[laneNow()]) || "#e6194b";
   // minute view: every listed box of the minute but the open one; solid = logged, dashed = not yet, grey = no
   if (minuteMode()) {
     ctx.font = "11px system-ui";
@@ -930,17 +942,6 @@ function draw() {
       ctx.setLineDash([]); ctx.fillStyle = c;
       ctx.fillText(`#${b.n}${mark[b.decision] ? " " + mark[b.decision] : ""}`, Math.max(g.x0 + 2, tx(g, a) + 2),
                    Math.min(g.y1 - 2, Math.max(g.y0 + 11, fy(g, hi) + 11)));
-    });
-  }
-  // Raven boxes
-  if ($("showRaven").checked) {
-    ctx.font = "11px system-ui";
-    RAVEN.forEach(r => {
-      const X0 = tx(g, r.begin_s), X1 = tx(g, r.end_s), Y0 = fy(g, r.hi_khz), Y1 = fy(g, r.lo_khz);
-      ctx.strokeStyle = "rgba(40,110,255,.9)"; ctx.lineWidth = 1.2; ctx.setLineDash([2, 2]);
-      ctx.strokeRect(X0, Y0, X1 - X0, Y1 - Y0);
-      ctx.setLineDash([]); ctx.fillStyle = "rgba(40,110,255,.95)";
-      ctx.fillText("Raven: " + r.label, Math.max(g.x0 + 2, X0 + 2), Math.max(g.y0 + 11, Y0 + 11));
     });
   }
   // audit window: shade what lies outside it
@@ -1017,7 +1018,7 @@ function secs(t) { const m = Math.floor(t / 60), s = t - 60 * m; return `${m}:${
 function span1() { return view[1] - view[0] <= 12; }
 function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
 window.addEventListener("resize", draw);
-["fview", "showRaven", "showCells"].forEach(id => $(id).addEventListener("change", draw));
+["fview", "showCells"].forEach(id => $(id).addEventListener("change", draw));
 
 // The box is set by drawing: drag anywhere on the spectrogram for a new box (also inside the
 // current one), or grab an edge / corner of the yellow box (within EDGE px) to move just that side.
@@ -1169,18 +1170,9 @@ function readout(g, x, y) {
 }
 
 // ---------------- overview: the whole recording ----------------
-// items listed (ticked groups and sources, every minute): filled = yes, outlined dashed = not logged yet,
-// grey = no; Raven boxes in blue; the minute grid (the open minute shaded); the view as a white frame
+// items listed (ticked groups, model and your boxes, every minute): filled = yes, outlined dashed = not logged
+// yet, grey = no; the minute grid (the open minute shaded); the view as a white frame
 const ov = $("overview"), octx = ov.getContext("2d");
-let RAVEN_ALL = {rec: "", boxes: []};
-async function loadRavenAll(rec) {
-  if (RAVEN_ALL.rec === rec) return;
-  RAVEN_ALL = {rec, boxes: []};
-  const d = (META.recordings.find(r => r.id === rec) || {}).duration_s || 0;
-  try { const b = await api(`api/raven?rec=${encodeURIComponent(rec)}&a=0&b=${d}`); if (RAVEN_ALL.rec === rec) RAVEN_ALL.boxes = b; }
-  catch { /* the strip just has no Raven boxes */ }
-  drawOverview();
-}
 function ovGeom() {
   const W = ov.clientWidth, H = ov.clientHeight, dpr = window.devicePixelRatio || 1;
   if (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr)) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
@@ -1193,7 +1185,7 @@ const ofy = (o, f) => o.y1 - Math.min(f, o.fv) / o.fv * (o.y1 - o.y0);
 const oxt = (o, x) => Math.max(0, Math.min(o.d, (x - o.x0) / (o.x1 - o.x0) * o.d));
 function drawOverview() {
   if (!META || !live()) return;
-  const o = ovGeom(), c = octx, rec = viewRec();
+  const o = ovGeom(), c = octx;
   c.fillStyle = "#111"; c.fillRect(0, 0, o.W, o.H);
   c.fillStyle = "#1c1c1c"; c.fillRect(o.x0, o.y0, o.x1 - o.x0, o.y1 - o.y0);
   // minutes: grid, labels where they fit, the open minute shaded
@@ -1206,10 +1198,6 @@ function drawOverview() {
     if (m < nm && m % every === 0) { c.fillStyle = "#aaa"; c.fillText(`${m}:00`, x + 2, o.H - 2); }
   }
   c.save(); c.beginPath(); c.rect(o.x0, o.y0, o.x1 - o.x0, o.y1 - o.y0); c.clip();
-  if ($("showRaven").checked && RAVEN_ALL.rec === rec) {
-    c.strokeStyle = "rgba(60,130,255,.75)"; c.lineWidth = 1;
-    RAVEN_ALL.boxes.forEach(r => c.strokeRect(otx(o, r.begin_s), ofy(o, r.hi_khz), Math.max(1, otx(o, r.end_s) - otx(o, r.begin_s)), ofy(o, r.lo_khz) - ofy(o, r.hi_khz)));
-  }
   const curB = BOXES[cur];
   listed().forEach(b => {
     if (b.source === "audit") {                            // audit windows: a band along the bottom
@@ -1424,7 +1412,6 @@ $("addFile").onchange = () => { const f = $("addFile").files[0]; $("addFile").va
 const curId = () => BOXES[cur] ? BOXES[cur].id : "";
 $("rec").onchange = () => loadRec("");
 $("lanes").addEventListener("change", () => { store.set("lanes", JSON.stringify(lanesOn())); fillRecs(); loadRec(curId()); });
-$("sources").addEventListener("change", () => { store.set("sources", JSON.stringify(sourcesOn())); loadRec(curId()); });
 $("kappa").onchange = () => { store.set("kappa", $("kappa").value); loadRec(curId()); };
 $("reviewer").onchange = () => store.set("reviewer", $("reviewer").value.trim());
 $("list").addEventListener("click", e => { const r = e.target.closest(".row"); if (r) select(+r.dataset.i); });

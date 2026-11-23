@@ -150,6 +150,9 @@ SOURCES = {"model": "model boxes", "near": "below threshold", "raven": "Raven, n
            "taxon": "taxon check"}
 TAXON_MODEL = "taxon head"           # the log's model for a box the taxon head found
 DEFAULT_SOURCES = ("model", "reviewer")
+# the review page's groups leave these out (2026-11-21: insects come from EarthChirp's cosine lane only;
+# no Weather); the public page and the learners still have every lane
+REVIEW_HIDDEN_LANES = ("Insecta", "EC-margin", "Weather")
 REFINED_SOURCES = ("model", "near")    # boxes the refiner works on (the others are a person's box)
 # box_shown.csv: one row per log row (joined on log_id) naming the box the reviewer started from:
 # refined | tight | tight (control) | previous (the box's last accepted box) | raven | drawn
@@ -1180,6 +1183,25 @@ class Store:
                                        "common": common, "others": others})
         return {**row, "id": row_id(row), "shown_box": shown}
 
+    def relabel(self, body: dict) -> dict:
+        """A model box whose call is of another group (the page's group buttons): the two rows a reviewer
+        would log by hand, No on the model box and the box drawn anew with the other group. The new box
+        (model reviewer) carries body's answer, species, top 5 and comment; the model box's row is No,
+        with no species, the same accepted box, and a comment naming the new box."""
+        d = self.box(body["id"], float(body["kappa"]))
+        lane = str(body.get("lane", ""))
+        if d["lane_editable"] or d["source"] == "audit":
+            raise ValueError("only a model box changes its group this way (a Raven or reviewer box takes lane=)")
+        if lane not in self.lanes or lane == d["lane"]:
+            raise ValueError(f"the call's group must be another group than {d['lane']!r}, not {lane!r}")
+        new = self.append({**body, "new": True, "recording": d["recording"], "lane": lane})
+        c = str(body.get("comment", "")).strip()
+        no = self.append({**{k: body[k] for k in ("kappa", "begin_s", "end_s", "lo_khz", "hi_khz")},
+                          "reviewer": body.get("reviewer", ""), "id": d["id"], "decision": "no", "species": [], "top": [], "prediction_span": "",
+                          "learned": [], "comment": f"the call is {lane}: logged as new box {new['log_id']}"
+                          + (f" · {c}" if c else "")})
+        return {**new, "model_row": no}
+
     def append_audit(self, body: dict) -> dict:
         """Closes an audit window: status complete (every call of the ticked groups has a box) or
         skipped (cannot be marked fully). One row in AUDIT_FILE; the newest row of a window wins."""
@@ -1336,6 +1358,7 @@ class Site:
 class Handler(BaseHTTPRequestHandler):
     store: Store = None
     site: Site | None = None                     # None: the local app (no login, no limits, no public side)
+    survey = False                               # --survey: the review page lists the survey's recordings too
     heavy = threading.BoundedSemaphore(HEAVY_AT_ONCE)
 
     def log_message(self, fmt, *args):          # quiet
@@ -1403,8 +1426,11 @@ class Handler(BaseHTTPRequestHandler):
             done = {}
             for bid, r in latest.items():
                 done[r["recording"]] = done.get(r["recording"], 0) + 1
+            lanes = [g for g in S.lanes if g not in REVIEW_HIDDEN_LANES]
+            # added audio only, unless the app runs with --survey (the survey's own recordings)
+            recs = [r for r in list(S.recs) if self.survey or r in S.added]
             self.json({"recordings": [{"id": r, "counts": S.box_counts[r], "reviewed": done.get(r, 0),
-                                       "added": S.added.get(r), **S.rec_info(r)} for r in list(S.recs)],
+                                       "added": S.added.get(r), **S.rec_info(r)} for r in recs],
                        "can_add": S.can_add and S._uploads_on, "uploads_dir": rel(UPLOADS_DIR),
                        "max_upload_mb": (SA.MAX_UPLOAD_BYTES if self.site is None else self.site.max_bytes) // 2**20,
                        "max_upload_min": None if self.site is None else self.site.max_duration_s / 60,
@@ -1412,7 +1438,7 @@ class Handler(BaseHTTPRequestHandler):
                        "public": False, "app_version": APP_VERSION,
                        "minute_s": MINUTE_S, "spec_windows": list(SPEC_WINDOWS),
                        "spec_range_db": SPEC_RANGE_DB, "view_play_s": VIEW_PLAY_S,
-                       "lanes": S.lanes, "default_on": S.default_on,
+                       "lanes": lanes, "default_on": [g for g in S.default_on if g in lanes],
                        "thresholds": S.thresholds, "near_low": S.near_low, "colors": pv.COLORS, "kappa": pv.KAPPA,
                        "has_cells": S.cells is not None, "row_edges_khz": pv.ROW_EDGES_KHZ,
                        "sources": {k: v for k, v in SOURCES.items()
@@ -1668,7 +1694,8 @@ class Handler(BaseHTTPRequestHandler):
             if role == "reviewer" and path in ("/api/log", "/api/audit"):
                 if site is not None:                  # the login's name, whatever the page sent
                     body["reviewer"] = self.reviewer()
-                self.json(S.append(body) if path == "/api/log" else S.append_audit(body))
+                self.json(S.append_audit(body) if path == "/api/audit"
+                          else S.relabel(body) if body.get("relabel") else S.append(body))
             elif role == "public" and path == "/api/flag":
                 addr = self.addr()
                 if site.count("flag", addr) >= FLAGS_PER_DAY:
@@ -1748,6 +1775,8 @@ def main() -> None:
                     help="no box refiner: tightened boxes only, no 'box uncertain' queue")
     ap.add_argument("--no-learners", action="store_true",
                     help="no species suggestions from reviews and no 'taxon check' source")
+    ap.add_argument("--survey", action="store_true",
+                    help="the review page lists the survey's recordings too (default: added audio only)")
     ap.add_argument("--export-raven", type=Path, metavar="DIR",
                     help="write a Raven selection table per reviewed recording into DIR and exit (no server)")
     ap.add_argument("--export-keep", choices=tuple(RAVEN_EXPORT), default="yes",
@@ -1785,6 +1814,7 @@ def main() -> None:
     print("loading scores, cell maps and the Raven tables ...", flush=True)
     Handler.store = Store(args.device, refiner, species, taxon)
     Handler.store.start_uploads()
+    Handler.survey = args.survey
     if args.public:
         Handler.site = Site(args.max_upload_mb, args.max_upload_min, args.daily_uploads, args.disk_quota_gb,
                             args.min_free_gb)
