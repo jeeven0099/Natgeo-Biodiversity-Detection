@@ -11,7 +11,7 @@ ZIP=${1:?usage: sudo bash setup_server.sh <server files zip>}
 APP=/srv/natgeo
 RUNAS=natgeo
 REPO=https://github.com/jeeven0099/Natgeo-Biodiversity-Detection.git
-PKGS="numpy==2.4.6 pandas==2.3.3 pyarrow==25.0.1 scipy==1.17.1 scikit-learn==1.9.1 soundfile==0.14.0 onnxruntime==1.22.0"
+PKGS="numpy==2.4.6 pandas==2.3.3 pyarrow==25.0.1 scipy==1.17.1 scikit-learn==1.9.1 soundfile==0.14.0 onnxruntime==1.22.0 pillow==13.0.0"
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 [ -f "$ZIP" ] || { echo "no file $ZIP" >&2; exit 1; }
