@@ -1736,6 +1736,9 @@ after it was stored.
    `<name> <hash>`, the hash from `caddy hash-password --plaintext '<password>'`. The name is what
    the log records. After an edit, `sudo systemctl reload caddy`.
 
+`.gitattributes` keeps `*.sh` and everything in `deploy/` in Unix line endings in every checkout,
+so a copy taken from a Windows checkout runs under bash on the server.
+
 `example.org`, `/srv/natgeo` and `natgeo` are placeholders. The real address and logins stay out of
 this public repo, as do `data\review` (it holds reviewers' names) and `data\uploads`. The deploy has
 been run only as a server-shaped copy on this laptop (below), not yet on a Linux server.
