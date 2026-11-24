@@ -59,10 +59,17 @@ have no Raven boxes; their answers are logged as usual, but review_labels.py lea
 learner (the learners are fitted and tested on the dataset's recordings only).
 
 Website (--public, behind the proxy in deploy/): anyone can upload audio at / (public_app.html) and see
-the model boxes, their top 5 and playback for their own uploads only. Each upload gets a private key;
-the link /u/<key> and an HttpOnly cookie hold it, and every public request is checked against the
-cookie's keys. Visitors cannot answer; they can flag a box ("this looks wrong": flags.csv, shown to
-reviewers, never a label) and delete their upload (files removed, deleted.csv; the learners skip it).
+the model boxes, their top 5 and playback for their own uploads only. A visitor is a guest: their files
+go to data/uploads/guests/<folder>/ (folder = sha256 of the session cookie, which has no Max-Age), under
+random ids, and exist only while their page is open: the page checks in every GUEST_PING_S (/api/alive)
+and says when it closes (/api/leave); a session with no open page is ended GUEST_GRACE_S after its last
+page closed (a reload keeps it), or GUEST_QUIET_S after anything was heard, and its folder is removed.
+A guest's uploads are never listed for reviewers (every reviewer request naming one is not found),
+never logged, never in prediction_cache.jsonl or deleted.csv, never flagged, never trained on. Uploads
+from before guests keep their private key: the link /u/<key> and an HttpOnly cookie hold it. Visitors
+cannot answer; on such an older upload they can flag a box ("this looks wrong": flags.csv, shown to
+reviewers, never a label); they can delete any of their uploads (an older one: deleted.csv; the
+learners skip it). Reviewers' own uploads (at /review/) are shared and kept, as in the local app.
 The review app moves to /review/, which the proxy guards with a login; the reviewer name in the log
 is the login's (REVIEWER_HEADER), not the page's field. Limits: --max-upload-mb, --max-upload-min,
 --daily-uploads per address (counted in memory only), --disk-quota-gb, --min-free-gb. Without
@@ -72,13 +79,14 @@ Reads segment_scores.csv, earthchirp_segments.csv, window_scores.csv, earthchirp
 cell_maps.npy, the Raven tables, the wavs, external/earthchirp_lib, config/*.csv and
 data/review/calibration/. Writes only data/review/annotation_log.csv, box_shown.csv, species_shown.csv,
 audit_windows.csv, flags.csv and prediction_cache.jsonl (box embeddings for the species learner stay in
-memory), and added audio with its scans under data/uploads.
+memory), and added audio with its scans under data/uploads (guests' only while their page is open).
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import datetime as dt
+import hashlib
 import io
 import json
 import queue
@@ -86,6 +94,7 @@ import secrets
 import shutil
 import sys
 import threading
+import time
 import traceback
 import uuid
 import webbrowser
@@ -194,6 +203,17 @@ FLAGS_PER_DAY = 200                              # per address
 MAX_COMMENT = 500
 PUBLIC_MAX_VIEW_S = MAX_VIEW_S                   # a visitor's spectrogram / view audio: at most this long
 HEAVY_AT_ONCE = 3                                # --public: spectrograms, audio and top 5s computed at once
+# guests (--public): a visitor's uploads live in their own folder, only while their page is open. The
+# session cookie (no Max-Age: the browser drops it on exit) names the session; on disk the folder is
+# sha256(cookie)[:32], so the cookie is never written anywhere.
+GUEST_COOKIE = "guest"
+GUEST_DIR = "guests"                             # under the uploads folder: guests/<folder>/{audio,scans}
+GUEST_PREFIX = "guest-"                          # a guest recording's id: this + 12 random hex digits
+GUEST_QUIET_S = 600.0                            # a tab that has not checked in for this long is gone
+GUEST_GRACE_S = 30.0                             # after a tab says it closed: time for a reload to check in
+GUEST_REAP_S = 15.0                              # how often sessions are checked
+GUEST_PING_S = 60                                # how often the pages check in (sent to them in /api/meta)
+GUEST_MAX_TABS = 20                              # tab ids a session keeps (the newest)
 
 
 def model_of(lane: str) -> str:
@@ -432,6 +452,11 @@ class Store:
         self._uploads_on = False
         self.key_rec: dict[str, str] = {}          # private key -> added recording (the website's links)
         self.rec_key: dict[str, str] = {}
+        # guests (--public, start_uploads(guests=True)): each session's uploads in its own folder
+        self.guests_on = False
+        self.sessions: dict[str, dict] = {}        # folder name -> {uploads, recs, tabs, seen, left, busy}
+        self.guest_of: dict[str, str] = {}         # guest recording -> folder name (kept after a delete)
+        self._guest_lock = threading.Lock()
 
     # ---- added audio (scan_audio.py) ------------------------------------------------------
     def add_off_reason(self) -> str:
@@ -439,11 +464,17 @@ class Store:
             return "a scan needs " + ", ".join(rel(p) for p in self.scan_missing)
         return "the app runs without earthchirp_embeddings.npy / a full cell_maps.npy"
 
-    def start_uploads(self) -> None:
+    def start_uploads(self, guests: bool = False) -> None:
+        """Starts the scan worker and loads the uploads folder; guests (--public): also the guest
+        folders a last run left, and the thread that ends quiet guest sessions."""
         if self._uploads_on:
             return
         self._uploads_on = True
         threading.Thread(target=self._scan_worker, name="scan-worker", daemon=True).start()
+        if guests:
+            self.guests_on = True
+            self._load_guests()
+            threading.Thread(target=self._guest_reaper, name="guest-reaper", daemon=True).start()
         recs = self.uploads.recordings()
         if not recs:
             return
@@ -467,13 +498,14 @@ class Store:
         print(f"added recordings: {len(self.added)} loaded from {rel(UPLOADS_DIR)}"
               + (f", {n_scan} to scan" if n_scan else ""), flush=True)
 
-    def _queue(self, rec: str, info: dict) -> dict:
+    def _queue(self, rec: str, info: dict, uploads: SA.Uploads | None = None) -> dict:
+        """Queues a scan; uploads: the folder the recording lives in (a guest's; default the shared one)."""
         job = {"rec": rec, "name": info["name"], "state": "queued", "done": 0,
                "total": int(np.ceil(info["duration_s"] / SA.HOP_S - 1e-9)) or 1, "error": "", "counts": {},
                "queued_at": dt.datetime.now().isoformat(timespec="seconds")}
         with self._add_lock:
             self.jobs[rec] = job
-        self._scan_q.put((rec, info))
+        self._scan_q.put((rec, info, uploads or self.uploads))
         return job
 
     def scanner(self) -> SA.Scanner:
@@ -484,10 +516,11 @@ class Store:
 
     def _scan_worker(self) -> None:
         while True:
-            rec, info = self._scan_q.get()
-            job = self.jobs[rec]
+            rec, info, up = self._scan_q.get()
+            job = self.jobs.get(rec)
             with self._add_lock:
-                if job["state"] == "deleted":          # deleted while queued
+                if job is None or job["state"] == "deleted":    # deleted while queued
+                    self._deleted_while_scanning(rec, info, up)
                     continue
                 job["state"] = "running"
             try:
@@ -496,19 +529,32 @@ class Store:
                 scan = self.scanner().scan(info["path"], progress)
                 with self._del_lock:
                     if job["state"] == "deleted":      # deleted while scanning: files the delete could not
-                        self.uploads.purge(rec, info)   # remove (open on Windows) go now; nothing is saved
+                        self._deleted_while_scanning(rec, info, up)   # remove (open on Windows) go now
                         continue
-                    SA.save_scan(self.uploads.scan_file(rec), scan, {"sha256": info["sha256"], "rec": rec})
+                    SA.save_scan(up.scan_file(rec), scan, {"sha256": info["sha256"], "rec": rec})
                     self._register(rec, info, scan)
                 job.update(state="done", counts=self.box_counts[rec], seconds=scan["meta"]["seconds"])
-                print(f"scanned {rec}: {len(scan['start_s'])} windows in {scan['meta']['seconds']} s, model boxes "
+                print(("scanned a guest upload" if rec in self.guest_of else f"scanned {rec}")
+                      + f": {len(scan['start_s'])} windows in {scan['meta']['seconds']} s, model boxes "
                       f"{sum(self.box_counts[rec].values())}", flush=True)
             except Exception as e:
                 if job["state"] == "deleted":          # the file went away under the scan
-                    self.uploads.purge(rec, info)
+                    self._deleted_while_scanning(rec, info, up)
                     continue
                 traceback.print_exc()
                 job.update(state="error", error=f"{type(e).__name__}: {e}")
+
+    def _deleted_while_scanning(self, rec: str, info: dict, up: SA.Uploads) -> None:
+        """A recording deleted while queued or scanning: nothing is saved, files left open go now; a
+        guest's job is forgotten, and so is the folder once its session has ended."""
+        up.purge(rec, info)
+        h = self.guest_of.get(rec)
+        if h is not None:
+            self.jobs.pop(rec, None)
+            with self._guest_lock:
+                ended = h not in self.sessions
+            if ended:
+                up.remove_all()
 
     def _register(self, rec: str, info: dict, scan: dict) -> None:
         """Makes a scanned file a recording like the dataset's: its rows go behind the caches', then
@@ -579,37 +625,230 @@ class Store:
         return None
 
     def delete_upload(self, rec: str) -> dict:
-        """An added recording's owner deletes it: files removed (scan_audio.Uploads.delete, logged in
-        deleted.csv), every table forgets it; a queued or running scan is dropped. Its window rows stay
-        behind the caches' (unreachable) until the next start. Log rows naming it stay (append-only);
-        the learners leave out recordings in deleted.csv."""
+        """An added recording's owner deletes it: files removed, every table forgets it (_forget); a
+        queued or running scan is dropped. A shared upload's delete is logged in deleted.csv
+        (scan_audio.Uploads.delete): log rows naming it stay (append-only), and the learners leave out
+        recordings in deleted.csv. A guest's upload leaves no trace (no row anywhere)."""
         with self._del_lock:
             with self._add_lock:
                 if rec not in self.added and rec not in self.jobs:
                     raise KeyError(rec)
-                if rec in self.jobs:
-                    self.jobs[rec]["state"] = "deleted"
-                for d in (self.added, self.wavs, self.box_counts, self.seg_by_rec, self.win_rows,
-                          self.embedder.starts, self._rec_info, self.twin._rec):
-                    d.pop(rec, None)
-                if self.cells is not None:
-                    self.cells.rows.pop(rec, None)
-                if rec in self.recs:
-                    self.recs.remove(rec)
-                key = self.rec_key.pop(rec, None)
-                self.key_rec.pop(key, None)
-            with self._lock:
-                self._boxes = {k: v for k, v in self._boxes.items() if k[0] != rec}
-                self._pred = {k: v for k, v in self._pred.items() if k.split("|")[0] != rec}
-                self._ref = {k: v for k, v in self._ref.items() if k[0].split("|")[0] != rec}
-            gone, left = self.uploads.delete(rec, "owner")
+            self._forget(rec)
+            h = self.guest_of.get(rec)
+            if h is None:
+                gone, left = self.uploads.delete(rec, "owner")
+            else:
+                with self._guest_lock:
+                    s = self.sessions.get(h)
+                    if s is not None and rec in s["recs"]:
+                        s["recs"].remove(rec)
+                gone, left = SA.Uploads(self.guest_root(h)).delete(rec, log=False)
         return {"rec": rec, "deleted": True, "removed": gone, "left": left}
+
+    def _forget(self, rec: str) -> None:
+        """Every table forgets an added recording (the caller holds _del_lock), and the window rows its
+        scan appended are freed (RowStack.release: they read as zeros), so a deleted upload holds no
+        memory until the next start. A queued or running scan is marked deleted (the worker drops it)."""
+        with self._add_lock:
+            j = self.jobs.get(rec)
+            if j is not None:
+                busy = j["state"] in ("queued", "running")
+                j["state"] = "deleted"
+                if rec in self.guest_of and not busy:     # a guest's finished job: nothing waits on it
+                    self.jobs.pop(rec, None)
+            rows = self.win_rows.get(rec) if rec in self.added else None
+            for d in (self.added, self.wavs, self.box_counts, self.seg_by_rec, self.win_rows,
+                      self.embedder.starts, self._rec_info, self.twin._rec):
+                d.pop(rec, None)
+            if self.cells is not None:
+                self.cells.rows.pop(rec, None)
+            if rec in self.recs:
+                self.recs.remove(rec)
+            key = self.rec_key.pop(rec, None)
+            self.key_rec.pop(key, None)
+            if rows is not None:
+                self.E.release(*rows)
+                self.cells.M.release(*rows)
+        with self._lock:
+            self._boxes = {k: v for k, v in self._boxes.items() if k[0] != rec}
+            self._pred = {k: v for k, v in self._pred.items() if k.split("|")[0] != rec}
+            self._ref = {k: v for k, v in self._ref.items() if k[0].split("|")[0] != rec}
+            self._learned = {k: v for k, v in self._learned.items() if k.split("|")[1:2] != [rec]}
+        with self._emb_lock:
+            for k in [k for k in self.embedder._grids if k[0] == rec]:
+                self.embedder._grids.pop(k, None)
+
+    # ---- guests (--public): uploads kept only while the guest's page is open ---------------
+    @staticmethod
+    def guest_folder(sid: str) -> str:
+        """A session's folder name: the cookie itself is never written to disk."""
+        return hashlib.sha256(sid.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def guest_root(h: str) -> Path:
+        return UPLOADS_DIR / GUEST_DIR / h
+
+    def _new_session(self, h: str) -> dict:
+        """A session for folder h (the caller holds _guest_lock or runs before the server)."""
+        s = {"folder": h, "uploads": SA.Uploads(self.guest_root(h)), "recs": [], "tabs": {},
+             "seen": time.monotonic(), "left": None, "busy": 0}
+        self.sessions[h] = s
+        return s
+
+    def _load_guests(self) -> None:
+        """Guest folders a last run left: each is a session again, with a fresh GUEST_QUIET_S, so a
+        guest whose page stayed open checks in with the same cookie and keeps their files; the others
+        are removed when that time is up."""
+        base = UPLOADS_DIR / GUEST_DIR
+        n_rec = n_scan = 0
+        dirs = sorted(d for d in base.iterdir() if d.is_dir()) if base.exists() else []
+        for d in dirs:
+            if len(d.name) != 32 or any(c not in "0123456789abcdef" for c in d.name):
+                continue                               # not a session folder: left alone
+            with self._guest_lock:
+                s = self._new_session(d.name)
+            for rec, info in s["uploads"].recordings().items():
+                if not rec.startswith(GUEST_PREFIX) or rec in self.wavs:
+                    continue
+                with self._guest_lock:
+                    s["recs"].append(rec)
+                    self.guest_of[rec] = d.name
+                n_rec += 1
+                if not self.can_add:
+                    continue
+                try:
+                    if s["uploads"].scan_ok(rec, info):
+                        self._register(rec, info, SA.load_scan(s["uploads"].scan_file(rec)))
+                        continue
+                except Exception:
+                    traceback.print_exc()
+                self._queue(rec, info, s["uploads"])
+                n_scan += 1
+        if dirs:
+            print(f"guest sessions from the last run: {len(self.sessions)} ({n_rec} uploads, {n_scan} to scan); "
+                  f"each is removed {GUEST_QUIET_S / 60:g} min from now unless its page checks in", flush=True)
+
+    def guest_session(self, sid: str | None, create: bool = False) -> tuple[str | None, dict | None]:
+        """-> (sid, session) for a cookie's sid, or (None, None). create: a new session (and sid) when
+        the cookie names none; a sid the server did not make is never adopted."""
+        with self._guest_lock:
+            s = self.sessions.get(self.guest_folder(sid)) if sid else None
+            if s is None and create:
+                sid = secrets.token_urlsafe(24)
+                s = self._new_session(self.guest_folder(sid))
+            return (sid if s is not None else None), s
+
+    def guest_recs(self, sid: str | None) -> list[str]:
+        """A session's uploads, oldest first (none for an unknown or ended session)."""
+        with self._guest_lock:
+            s = self.sessions.get(self.guest_folder(sid)) if sid else None
+            return list(s["recs"]) if s is not None else []
+
+    def guest_ping(self, sid: str | None, tab: str, leave: bool = False) -> bool:
+        """POST /api/alive (leave False) or /api/leave from one of the session's tabs -> the session
+        is still there."""
+        tab = str(tab)[:64]
+        with self._guest_lock:
+            s = self.sessions.get(self.guest_folder(sid)) if sid else None
+            if s is None:
+                return False
+            now = time.monotonic()
+            if leave:
+                s["tabs"].pop(tab, None)
+                s["left"] = now
+            elif tab:
+                s["tabs"].pop(tab, None)
+                s["tabs"][tab] = now
+                while len(s["tabs"]) > GUEST_MAX_TABS:
+                    s["tabs"].pop(next(iter(s["tabs"])))
+                s["seen"] = now
+            return True
+
+    def reap_guests(self, now: float | None = None) -> int:
+        """Ends the sessions no page keeps open: no tab checked in within GUEST_QUIET_S, no upload
+        arriving, and either a tab said it closed over GUEST_GRACE_S ago or nothing was heard for
+        GUEST_QUIET_S. Their uploads are forgotten and their folder removed. -> sessions ended."""
+        now = time.monotonic() if now is None else now
+        ended = []
+        with self._guest_lock:
+            for h, s in list(self.sessions.items()):
+                s["tabs"] = {t: v for t, v in s["tabs"].items() if now - v <= GUEST_QUIET_S}
+                if s["busy"] or s["tabs"]:
+                    continue
+                left = s["left"] is not None and now - max(s["left"], s["seen"]) > GUEST_GRACE_S
+                if left or now - s["seen"] > GUEST_QUIET_S:
+                    del self.sessions[h]
+                    ended.append(s)
+        for s in ended:
+            with self._del_lock:
+                for rec in s["recs"]:
+                    self._forget(rec)
+                s["uploads"].remove_all()          # a file still open (a scan) goes when the worker drops it
+            print(f"guest session ended: {len(s['recs'])} upload(s) removed", flush=True)
+        return len(ended)
+
+    def _guest_reaper(self) -> None:
+        while True:
+            time.sleep(GUEST_REAP_S)
+            try:
+                self.reap_guests()
+            except Exception:
+                traceback.print_exc()
+
+    def add_guest_upload(self, sid: str | None, tab: str, read, length: int, name: str, limit: int | None,
+                         max_duration_s: float | None, too_big: str) -> tuple[str, dict]:
+        """POST /api/upload from the website: the file goes to the guest's own folder under a random id
+        (a new session when the cookie names none) -> (sid, {rec, created, key None, job}). Nothing of
+        it reaches the shared folder, the logs or the learners; no other visitor or reviewer sees it."""
+        if not (self.can_add and self._uploads_on and self.guests_on):
+            raise ValueError(f"adding audio is off on this server: {self.add_off_reason()}")
+        sid0 = sid
+        sid, s = self.guest_session(sid, create=True)
+        with self._guest_lock:
+            s["busy"] += 1                         # the session is not ended while the file arrives
+        try:
+            self.guest_ping(sid, tab)
+            taken = {r.lower() for r in list(self.wavs)} | {r.lower() for r in list(self.guest_of)}
+            rec, info, created = s["uploads"].receive(
+                read, length, name, taken, limit=limit, max_duration_s=max_duration_s, extra={"via": "guest"},
+                too_big=too_big, rec_id=GUEST_PREFIX + secrets.token_hex(6))
+            with self._guest_lock:
+                if rec not in s["recs"]:
+                    s["recs"].append(rec)
+                self.guest_of[rec] = s["folder"]
+            job = self.jobs.get(rec)
+            if rec in self.added:
+                job = job or {"rec": rec, "name": info["name"], "state": "done", "done": 1, "total": 1,
+                              "error": "", "counts": self.box_counts[rec]}
+            elif job is None or job["state"] in ("error", "deleted"):
+                job = self._queue(rec, info, s["uploads"])
+            return sid, {"rec": rec, "created": created, "key": None, "job": dict(job)}
+        except BaseException:
+            if sid != sid0:                        # refused, and the session was made for it: no cookie
+                with self._guest_lock:             # names it, so it ends now (not after GUEST_QUIET_S)
+                    gone = self.sessions.get(s["folder"]) is s and not s["recs"]
+                    if gone:
+                        del self.sessions[s["folder"]]
+                if gone:
+                    s["uploads"].remove_all()
+            raise
+        finally:
+            with self._guest_lock:
+                s["busy"] -= 1
+                s["seen"] = time.monotonic()
+            self.guest_ping(sid, tab)
+
+    def is_guest(self, *refs) -> bool:
+        """Does any of these (a recording, a box id 'rec|...', 'new|rec') name a guest's recording?"""
+        return any(p in self.guest_of for r in refs if r for p in str(r).split("|"))
 
     # ---- visitor flags (--public) ----------------------------------------------------------
     def append_flag(self, body: dict) -> dict:
         """A visitor's "this looks wrong" on a model box: one row in FLAGS_FILE. Reviewers see the count;
-        no learner reads it."""
+        no learner reads it. A guest's boxes cannot be flagged: no reviewer ever sees them."""
         d = self.box(str(body.get("id", "")), float(body.get("kappa", pv.KAPPA)))
+        if d["recording"] in self.guest_of:
+            raise ValueError("this upload is yours only: reviewers do not see it, so it cannot be flagged")
         row = {"flag_id": uuid.uuid4().hex[:12], "flagged_at": dt.datetime.now().isoformat(timespec="seconds"),
                "box_id": d["id"], "recording": d["recording"], "lane": d["lane"], "begin_s": d["begin_s"],
                "end_s": d["end_s"], "comment": " ".join(str(body.get("comment", "")).split())[:MAX_COMMENT],
@@ -1025,8 +1264,9 @@ class Store:
             res["score_name"] = "EarthChirp cosine (max over windows)"
         with self._lock:
             self._pred[key] = res
-            with CACHE_FILE.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(res) + "\n")
+            if rec not in self.guest_of:              # a guest's top 5s stay in memory only
+                with CACHE_FILE.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(res) + "\n")
         return res
 
     def common_of(self, name: str) -> str:
@@ -1407,8 +1647,12 @@ class Handler(BaseHTTPRequestHandler):
             else f"{type(e).__name__}: {e}"
 
     def get_reviewer(self, path: str, q: dict) -> None:
-        """The review app (the local app, or /review/ behind the login in --public mode)."""
+        """The review app (the local app, or /review/ behind the login in --public mode). A guest's
+        recording does not exist here: not listed, and every request naming it is not found."""
         S = self.store
+        if S.is_guest(q.get("rec"), q.get("id")):
+            self.send(404, b"not found", "text/plain")
+            return
         if path == "/":
             self.send(200, HTML_FILE.read_bytes(), "text/html; charset=utf-8")
         elif path == "/editor":
@@ -1428,7 +1672,7 @@ class Handler(BaseHTTPRequestHandler):
                 done[r["recording"]] = done.get(r["recording"], 0) + 1
             lanes = [g for g in S.lanes if g not in REVIEW_HIDDEN_LANES]
             # added audio only, unless the app runs with --survey (the survey's own recordings)
-            recs = [r for r in list(S.recs) if self.survey or r in S.added]
+            recs = [r for r in list(S.recs) if (self.survey or r in S.added) and r not in S.guest_of]
             self.json({"recordings": [{"id": r, "counts": S.box_counts[r], "reviewed": done.get(r, 0),
                                        "added": S.added.get(r), **S.rec_info(r)} for r in recs],
                        "can_add": S.can_add and S._uploads_on, "uploads_dir": rel(UPLOADS_DIR),
@@ -1517,7 +1761,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/species":
             self.json(S.search(q.get("q", "")))
         elif path == "/api/scans":
-            self.json([{**j, "position": S.queue_position(r)} for r, j in list(S.jobs.items())])
+            self.json([{**j, "position": S.queue_position(r)} for r, j in list(S.jobs.items())
+                       if r not in S.guest_of])
         else:
             self.send(404, b"not found", "text/plain")
 
@@ -1541,13 +1786,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/meta":
             recs = []
             for r in self.owned():
-                a, key = S.added.get(r), S.rec_key.get(r)
-                if a is None or key is None or r not in S.box_counts:     # still scanning (see /api/scans)
+                a, key, guest = S.added.get(r), S.rec_key.get(r), r in S.guest_of
+                if a is None or (key is None and not guest) or r not in S.box_counts:   # still scanning
                     continue
-                recs.append({"id": r, "name": a["name"], "added_at": a["added_at"], "link": f"u/{key}",
-                             "counts": S.box_counts[r], **S.rec_info(r)})
+                recs.append({"id": r, "name": a["name"], "added_at": a["added_at"], "guest": guest,
+                             "link": None if guest else f"u/{key}", "counts": S.box_counts[r], **S.rec_info(r)})
             left = site.daily_uploads - site.count("upload", self.addr())
             self.json({"public": True, "app_version": APP_VERSION, "recordings": recs,
+                       "guest": S.guest_session(self.guest_sid())[1] is not None, "guest_ping_s": GUEST_PING_S,
+                       "guest_quiet_min": GUEST_QUIET_S / 60,
                        "can_add": S.can_add and S._uploads_on, "max_upload_mb": site.max_bytes // 2**20,
                        "max_upload_min": site.max_duration_s / 60, "daily_uploads": site.daily_uploads,
                        "uploads_left_today": max(0, left), "minute_s": MINUTE_S, "max_view_s": PUBLIC_MAX_VIEW_S,
@@ -1657,9 +1904,22 @@ class Handler(BaseHTTPRequestHandler):
         return f"{KEY_COOKIE}={'.'.join(keys)}; Path=/; Max-Age={age}; HttpOnly; SameSite=Lax{secure}"
 
     def owned(self) -> list[str]:
-        """The visitor's uploads: the recordings their cookie's keys name, oldest first."""
-        out = [self.store.key_rec.get(k) for k in self.cookie_keys()]
+        """The visitor's uploads: the recordings their cookie's keys name (uploads from before guest
+        sessions), then their guest session's, oldest first."""
+        out = [self.store.key_rec.get(k) for k in self.cookie_keys()] + self.store.guest_recs(self.guest_sid())
         return list(dict.fromkeys(r for r in out if r is not None))
+
+    def guest_sid(self) -> str | None:
+        try:
+            m = SimpleCookie(str(self.headers.get("Cookie", ""))).get(GUEST_COOKIE)
+        except CookieError:
+            return None
+        return m.value[:64] if m is not None and m.value else None
+
+    def guest_cookie(self, sid: str) -> str:
+        """Set-Cookie for a guest session: no Max-Age, so the browser drops it when it closes."""
+        secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "") == "https" else ""
+        return f"{GUEST_COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax{secure}"
 
     def own(self, rec: str, scanned: bool = False) -> str:
         if rec not in self.owned() or (scanned and rec not in self.store.seg_by_rec):
@@ -1683,7 +1943,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path, q, role = self.route()
             if path == "/api/upload":                 # raw audio bytes, streamed to disk (not JSON)
-                self.upload(q.get("name", "added.wav"), role)
+                self.upload(q.get("name", "added.wav"), role, q.get("tab", ""))
                 return
             n = int(self.headers.get("Content-Length", 0))
             if site is not None and n > MAX_JSON_BYTES:
@@ -1692,6 +1952,9 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("expected a JSON object")
             if role == "reviewer" and path in ("/api/log", "/api/audit"):
+                if S.is_guest(body.get("id"), body.get("recording")):    # never logged: not found
+                    self.send(404, b"not found", "text/plain")
+                    return
                 if site is not None:                  # the login's name, whatever the page sent
                     body["reviewer"] = self.reviewer()
                 self.json(S.append_audit(body) if path == "/api/audit"
@@ -1708,6 +1971,9 @@ class Handler(BaseHTTPRequestHandler):
                 rec = self.own(str(body.get("rec", "")))
                 S.delete_upload(rec)
                 self.json({"rec": rec, "deleted": True}, headers={"Set-Cookie": self.key_cookie(self.cookie_keys())})
+            elif role == "public" and path in ("/api/alive", "/api/leave"):    # a guest page checks in / closes
+                self.json({"guest": S.guest_ping(self.guest_sid(), str(body.get("tab", "")),
+                                                 leave=path == "/api/leave")})
             else:
                 self.send(404, b"not found", "text/plain")
         except Redirect as r:
@@ -1720,10 +1986,11 @@ class Handler(BaseHTTPRequestHandler):
             self.json({"error": self.input_error(e) if isinstance(e, (ValueError, KeyError))
                        else self.shown_error(e)}, 400)
 
-    def upload(self, name: str, role: str) -> None:
+    def upload(self, name: str, role: str, tab: str = "") -> None:
         """POST /api/upload. --public: at most --max-upload-mb and --max-upload-min, inside the disk quota;
-        a visitor's address at most --daily-uploads new files a day (reviewers: no daily count). The
-        answer sets the cookie that remembers the upload's private key."""
+        a visitor's address at most --daily-uploads new files a day (reviewers: no daily count). A
+        visitor's file is a guest upload (their session's folder; the answer sets the session cookie);
+        a reviewer's joins the shared uploads, with a private key as before."""
         S, site = self.store, self.site
         length = int(self.headers.get("Content-Length", 0))
         if site is None:
@@ -1734,6 +2001,15 @@ class Handler(BaseHTTPRequestHandler):
             raise HTTPError(429, f"{site.daily_uploads} uploads a day per address: please try again tomorrow")
         if 0 < length <= site.max_bytes:
             site.room(S.uploads, length)
+        if role == "public":
+            sid, res = S.add_guest_upload(self.guest_sid(), tab, self.rfile.read, length, name,
+                                          limit=site.max_bytes, max_duration_s=site.max_duration_s,
+                                          too_big="cut it into parts")
+            if res["created"]:
+                site.add("upload", addr)
+            res["link"] = None
+            self.json(res, headers={"Set-Cookie": self.guest_cookie(sid)})
+            return
         res = S.add_upload(self.rfile.read, length, name, limit=site.max_bytes, max_duration_s=site.max_duration_s,
                            via="website" if role == "public" else "reviewer", too_big="cut it into parts")
         if res["created"] and role == "public":
@@ -1813,7 +2089,7 @@ def main() -> None:
         print(f"species learner: {sp}; taxon head: {', '.join(taxon.adopted()) or 'no group adopted'}", flush=True)
     print("loading scores, cell maps and the Raven tables ...", flush=True)
     Handler.store = Store(args.device, refiner, species, taxon)
-    Handler.store.start_uploads()
+    Handler.store.start_uploads(guests=args.public)
     Handler.survey = args.survey
     if args.public:
         Handler.site = Site(args.max_upload_mb, args.max_upload_min, args.daily_uploads, args.disk_quota_gb,

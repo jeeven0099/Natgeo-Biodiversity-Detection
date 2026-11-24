@@ -39,6 +39,11 @@ defaults); fewer are reported as too few labels. The cut is the lowest confidenc
 least P_WIN of the held-out refined boxes are no worse than the grid box, over at least MIN_SHOWN
 boxes.
 
+Recordings (review_sources.py, --uploads-dir): the survey's and the scanned audio added in the app.
+The refined boxes of each coarse box at every GRID setting are cached (data/review/refine_cache/,
+BoxCache, --cache): they need the audio, which the server has only for added recordings, so survey
+boxes come from the cache built where the audio is; a box with neither is left out, with a count.
+
 Writes data/review/calibration/refiner.json (review_app.py reads it at start: adopted groups get
 refined boxes; every group's confidence fills the "box uncertain" queue), refine_settings.csv,
 refine_boxes.csv and refine_grid.csv.
@@ -86,6 +91,7 @@ MIN = dict(boxes=20, recordings=3)
 BOOT, SEED = 2000, 0
 OUT_DIR = pv.ROOT / "data" / "review" / "calibration"
 REFINER_FILE = OUT_DIR / "refiner.json"
+CACHE_DIR = pv.ROOT / "data" / "review" / "refine_cache"   # BoxCache
 CONTROL_SHOWN = ("tight", "tight (control)",   # shown_box values whose accepted box is not anchored on a refined one
                  "raven-auto")                # (a model box fitted to its Raven box, raven_autolabel.py)
 MERGED_SHOWN = "raven-auto merge"            # several model boxes merged into one Raven box: not a box label
@@ -297,16 +303,81 @@ def half_of(rec: str) -> int:
     return zlib.crc32(rec.encode()) % 2
 
 
-def build_table(box: pd.DataFrame, patch_of) -> Table:
-    """box: pipeline yes boxes (review_labels box rows, with shown_box). patch_of(row, coarse) -> Patch."""
+def cache_version() -> str:
+    """Changes with anything that changes a refined box: the STFT, the patch and the GRID."""
+    c = [N_FFT, HOP_S, MARGIN_S, FREQ_FACTOR, CONTEXT_S, FLOOR_Q, FLOOR_FRAMES, MAX_SPAN_S, SMOOTH_SIGMA, GRID]
+    return f"refine-{zlib.crc32(json.dumps(c).encode()):08x}"
+
+
+class BoxCache:
+    """The refined boxes of a coarse box at every GRID setting, (len(GRID), 4) float64 (NaN where none),
+    keyed by recording|coarse box (3 decimals): boxes.npy + index.csv. They depend on the audio and
+    the coarse box only (not on the accepted box), so the server, which has no dataset/ audio, fits
+    on the survey boxes cached where the audio is. Rows of another cache_version() are ignored."""
+
+    def __init__(self, folder: Path | None = CACHE_DIR):
+        self.folder = Path(folder) if folder is not None else None
+        self.version = cache_version()
+        self.keys: list[str] = []
+        self.rows: list[np.ndarray] = []
+        self.pos: dict[str, int] = {}
+        self.dirty = False
+        if self.folder is not None and (self.folder / "index.csv").exists() and (self.folder / "boxes.npy").exists():
+            idx = pd.read_csv(self.folder / "index.csv", keep_default_na=False)
+            B = np.load(self.folder / "boxes.npy")
+            if len(idx) != len(B):
+                raise SystemExit(f"{self.folder} index.csv has {len(idx)} rows, boxes.npy {len(B)}: delete both")
+            for k, v, b in zip(idx["key"], idx["version"], B, strict=True):
+                if v == self.version and B.shape[1:] == (len(GRID), 4):
+                    self._add(k, b)
+
+    @staticmethod
+    def key(rec: str, coarse) -> str:
+        a, b, lo, hi = (float(x) for x in coarse)
+        return f"{rec}|{a:.3f}|{b:.3f}|{lo:.3f}|{hi:.3f}"
+
+    def _add(self, k: str, b: np.ndarray) -> None:
+        self.pos[k] = len(self.keys)
+        self.keys.append(k)
+        self.rows.append(np.asarray(b, float))
+
+    def get(self, rec: str, coarse) -> np.ndarray | None:
+        i = self.pos.get(self.key(rec, coarse))
+        return None if i is None else self.rows[i]
+
+    def add(self, rec: str, coarse, b: np.ndarray) -> None:
+        if self.key(rec, coarse) not in self.pos:
+            self._add(self.key(rec, coarse), b)
+            self.dirty = True
+
+    def save(self) -> None:
+        if not self.dirty or self.folder is None:
+            return
+        self.folder.mkdir(parents=True, exist_ok=True)
+        tb, ti = self.folder / "boxes.partial.npy", self.folder / "index.partial.csv"
+        np.save(tb, np.stack(self.rows) if self.rows else np.zeros((0, len(GRID), 4)))
+        pd.DataFrame(dict(key=self.keys, version=self.version)).to_csv(ti, index=False)
+        tb.replace(self.folder / "boxes.npy")
+        ti.replace(self.folder / "index.csv")
+        self.dirty = False
+
+
+def build_table(box: pd.DataFrame, patch_of, cache: BoxCache | None = None) -> Table:
+    """box: pipeline yes boxes (review_labels box rows, with shown_box). patch_of(row, coarse) -> Patch,
+    called only for boxes the cache does not hold."""
     info, Bs, Is, G = [], [], [], []
     for b in box.itertuples():
         coarse = tuple(float(getattr(b, f"tight_{e}")) for e in EDGES)
         acc = tuple(float(getattr(b, f"accepted_{e}")) for e in EDGES)
-        P = patch_of(b, coarse)
-        bx = boxes_for(P, GRID) if P is not None else {}
-        Bs.append(np.array([bx.get(s) if bx.get(s) is not None else (np.nan,) * 4 for s in GRID], float))
-        Is.append(np.array([iou(bx[s], acc) if bx.get(s) is not None else 0.0 for s in GRID]))
+        Bb = cache.get(b.recording, coarse) if cache is not None else None
+        if Bb is None:
+            P = patch_of(b, coarse)
+            bx = boxes_for(P, GRID) if P is not None else {}
+            Bb = np.array([bx.get(s) if bx.get(s) is not None else (np.nan,) * 4 for s in GRID], float)
+            if cache is not None:
+                cache.add(b.recording, coarse, Bb)
+        Bs.append(Bb)
+        Is.append(np.array([iou(tuple(r), acc) if not np.isnan(r).any() else 0.0 for r in Bb]))
         G.append(iou(coarse, acc))
         shown = getattr(b, "shown_box", "tight") or "tight"
         info.append(dict(box_id=b.box_id, recording=b.recording, split=b.split, group=b.group, shown_box=shown,
@@ -507,21 +578,32 @@ def main() -> int:
         ap.add_argument(f"--min-{k}", type=int, default=v, help=f"support needed before fitting (default {v})")
     ap.add_argument("--boot", type=int, default=BOOT)
     ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--uploads-dir", type=Path, default=L.SRC.SA.UPLOADS_DIR, help="audio added in the app")
+    ap.add_argument("--cache", type=Path, default=CACHE_DIR, help="refined boxes per coarse box (BoxCache)")
     args = ap.parse_args()
     mins = {k: getattr(args, f"min_{k}") for k in MIN}
 
-    lab = L.labels_from_logs(L.read_csv_rows(args.log), L.read_csv_rows(args.audit), L.read_csv_rows(args.shown))
+    src = L.SRC.Sources(args.uploads_dir)
+    print(src.describe())
+    lab = L.labels_from_logs(L.read_csv_rows(args.log), L.read_csv_rows(args.audit), L.read_csv_rows(args.shown),
+                             sources=src)
     box = pipeline_yes(pd.DataFrame(lab["box"], columns=L.BOX_COLS))
-    wavs = pv.wav_paths()
-    box = box[box["recording"].isin(set(wavs))].sort_values(["recording", "box_begin_s"]).reset_index(drop=True)
-    T = build_table(box, lambda b, coarse: make_patch(wavs[b.recording], coarse))
+    audio, cache = src.audio(), BoxCache(args.cache)
+    here = np.array([t["recording"] in audio or cache.get(t["recording"], [t[f"tight_{e}"] for e in EDGES]) is not None
+                     for t in box.to_dict("records")], bool).reshape(-1)
+    if (~here).any():
+        print(f"left out: {int((~here).sum())} boxes with no audio here and not in {args.cache}")
+    box = box[here].sort_values(["recording", "box_begin_s"]).reset_index(drop=True)
+    T = build_table(box, lambda b, coarse: make_patch(audio[b.recording], coarse), cache)
+    cache.save()
     entries, sets = fit_all(T, mins, args.boot, args.seed)
     spec = dict(version=dt.datetime.now().isoformat(timespec="seconds"), kind="rule",
                 constants=dict(N_FFT=N_FFT, HOP_S=HOP_S, MARGIN_S=MARGIN_S, FREQ_FACTOR=FREQ_FACTOR,
                                CONTEXT_S=CONTEXT_S, FLOOR_Q=FLOOR_Q, SMOOTH_SIGMA=SMOOTH_SIGMA,
                                CONTROL_SHARE=CONTROL_SHARE, P_WIN=P_WIN, MIN_SHOWN=MIN_SHOWN,
                                EDGE_TOL=list(EDGE_TOL), NESTED_EXTRA=NESTED_EXTRA),
-                minimum_support=mins, groups=entries, log=str(args.log))
+                minimum_support=mins, groups=entries, log=str(args.log), added_recordings=len(src.uploads),
+                left_out_boxes=int((~here).sum()))
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "refiner.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
     sets.to_csv(args.out / "refine_settings.csv", index=False)

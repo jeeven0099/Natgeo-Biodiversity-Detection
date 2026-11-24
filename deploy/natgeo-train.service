@@ -1,0 +1,32 @@
+# systemd unit for the weekly refit of the app's learners: /etc/systemd/system/natgeo-train.service
+# Started by natgeo-train.timer (Sundays 03:00 Singapore time); by hand: sudo systemctl start natgeo-train
+# scripts/weekly_train.py fits taxon, species, refiner and calibrate one at a time beside the app, swaps
+# a learner in only when the swap rule holds (README: weekly_train.py) and leaves
+# data/review/weekly/restart-app when it swapped something; ExecStopPost then restarts callfinder, since
+# the app reads the learners only at start. Report: data/review/weekly/<stamp>/report.txt.
+# Paths and User= as in callfinder.service.
+[Unit]
+Description=Weekly refit of the Call Finder learners (scripts/weekly_train.py)
+After=callfinder.service
+
+[Service]
+Type=oneshot
+User=natgeo
+WorkingDirectory=/srv/natgeo
+ExecStart=/srv/natgeo/.venv-perch/bin/python -X utf8 scripts/weekly_train.py
+ExecStopPost=+/bin/sh -c 'if [ -e /srv/natgeo/data/review/weekly/restart-app ]; then rm -f /srv/natgeo/data/review/weekly/restart-app; systemctl restart callfinder; fi'
+# Behind the app: lower CPU and disk priority, and a memory ceiling so a fit cannot push the app out.
+# Measured peaks (2026-11-24): taxon 1139 MB, calibrate 320, species 286 (every box cached), refiner 240;
+# the app ~1.4 GB of 3.8 GB. Above MemoryHigh the fit is slowed into swap; at MemoryMax it is killed
+# (live files kept, the next run retries). OOMScoreAdjust: if memory still runs out, the kernel picks
+# the fit, not the app.
+Nice=10
+CPUWeight=20
+IOSchedulingClass=idle
+MemoryHigh=1500M
+MemoryMax=2G
+OOMScoreAdjust=500
+TimeoutStartSec=6h
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full

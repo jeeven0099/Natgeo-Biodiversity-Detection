@@ -37,7 +37,12 @@ Rows raven_autolabel.py wrote (reviewer "raven-auto") are labels like any other,
 boxes merged into one Raven box (same accepted box) give that box's taxon and species rows once.
 Nothing here guesses a label: an unboxed stretch is a negative only inside a complete audit window;
 Raven gaps and unreviewed boxes are never negatives. Every row carries the recording's split from
-data/splits.csv ("" for the 26 recordings outside it), so learners can hold out whole recordings.
+data/splits.csv ("" for the 26 recordings outside it and for audio added in the app), so learners
+can hold out whole recordings.
+
+Recordings (review_sources.py, --uploads-dir): the survey's (the long-form caches, dataset/) and the
+scanned audio added in the app (data/uploads). Rows of any other recording are left out: a deleted
+upload (deleted.csv), one not yet scanned, a name both an upload and a survey recording have.
 """
 from __future__ import annotations
 
@@ -48,12 +53,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import soundfile as sf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import insecta_compare as IC  # noqa: E402
 import raven_match as RM  # noqa: E402
 import review_app as R  # noqa: E402
+import review_sources as SRC  # noqa: E402
 
 pv, z = R.pv, R.z
 ROOT = R.ROOT
@@ -372,21 +377,26 @@ def in_window(windows: dict, rec: str, group: str, a: float, b: float) -> str:
 
 
 def labels_from_logs(log_rows: list[dict], audit_rows: list[dict], shown_rows=(),
-                     species_shown_rows=()) -> dict[str, list[dict]]:
-    """build() with the splits, the names tables and each audited recording's Nyquist read from disk;
+                     species_shown_rows=(), sources: SRC.Sources | None = None) -> dict[str, list[dict]]:
+    """build() with the splits, the names tables and each audited recording's Nyquist;
     shown_rows: box_shown.csv rows; species_shown_rows: species_shown.csv rows.
-    Rows of recordings outside dataset/ (audio added in the app, scan_audio.py) are left out: they have
-    no split, and the learners are fitted and tested on the dataset's recordings only."""
+    sources (review_sources.Sources; default: the survey + data/uploads): rows of recordings it does
+    not know are left out (a deleted or unscanned upload, a name both an upload and a survey
+    recording have). Added recordings have no split (""): the learners hold out whole recordings."""
+    src = sources if sources is not None else SRC.Sources()
     splits = {r["session_id"]: r["split"] for r in read_csv_rows(SPLITS_FILE)}
-    wavs = pv.wav_paths()
+    known = src.known()
     n_log, n_audit = len(log_rows), len(audit_rows)
-    log_rows = [r for r in log_rows if r["recording"] in wavs]
-    audit_rows = [r for r in audit_rows if r["recording"] in wavs]
+    log_rows = [r for r in log_rows if r["recording"] in known]
+    audit_rows = [r for r in audit_rows if r["recording"] in known]
     if len(log_rows) < n_log or len(audit_rows) < n_audit:
-        print(f"left out (added audio, not in dataset/): {n_log - len(log_rows)} log rows, "
+        print(f"left out (no known recording: a deleted or unscanned upload): {n_log - len(log_rows)} log rows, "
               f"{n_audit - len(audit_rows)} audit rows", flush=True)
-    recs = {r["recording"] for r in audit_rows}
-    top_khz = {r: sf.info(wavs[r]).samplerate / 2000 for r in recs if r in wavs}
+    top_khz = {}
+    for r in {r["recording"] for r in audit_rows}:
+        k = src.nyquist_khz(r)
+        if k is not None:
+            top_khz[r] = k
     return build(log_rows, audit_rows, splits, Names(), top_khz, {r["log_id"]: r["shown_box"] for r in shown_rows},
                  {r["log_id"]: r["learned_shown"] for r in species_shown_rows})
 
@@ -398,9 +408,12 @@ def main() -> int:
     ap.add_argument("--shown", type=Path, default=R.SHOWN_FILE)
     ap.add_argument("--species-shown", type=Path, default=R.SPECIES_SHOWN_FILE)
     ap.add_argument("--out", type=Path, default=OUT_DIR)
+    ap.add_argument("--uploads-dir", type=Path, default=SRC.SA.UPLOADS_DIR, help="audio added in the app")
     args = ap.parse_args()
     log_rows, audit_rows = read_csv_rows(args.log), read_csv_rows(args.audit)
-    out = labels_from_logs(log_rows, audit_rows, read_csv_rows(args.shown), read_csv_rows(args.species_shown))
+    src = SRC.Sources(args.uploads_dir)
+    print(src.describe())
+    out = labels_from_logs(log_rows, audit_rows, read_csv_rows(args.shown), read_csv_rows(args.species_shown), src)
     args.out.mkdir(parents=True, exist_ok=True)
     for key, cols in (("box", BOX_COLS), ("taxon", TAXON_COLS), ("species", SPECIES_COLS),
                       ("audit", AUDIT_LABEL_COLS), ("withheld", WITHHELD_COLS)):

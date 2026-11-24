@@ -64,10 +64,10 @@ details summary { cursor: pointer; color: var(--muted); }
 <main>
   <div class="card">
     <div class="small">Opening a file reads it in this browser tab; <i>save WAV</i> downloads the edited copy,
-      and nothing is written to the project. <i>detect calls</i> is the one exception: it sends the file
+      and nothing is written to the project. <span id="detnote"><i>detect calls</i> is the one exception: it sends the file
       (the original bytes if unedited, else the edit as a 32-bit float WAV) to data/uploads, where the
-      zero-shot model runs on it and the box review lists it. Answers given there are logged as usual;
-      the learners leave added recordings out.</div>
+      zero-shot model runs on it and the box review lists it. Answers given there are logged as usual,
+      and the learners count them like any upload's.</span></div>
     <div id="wrap"><canvas id="spec"></canvas><div id="readout"></div></div>
     <canvas id="overview" title="the whole file: click or drag to move the view"></canvas>
     <div class="bar">
@@ -676,10 +676,31 @@ function buttons() {
 // unedited: the bytes as opened (the server reads the file at its own rate); edited, recorded, or a
 // format the server cannot read: the audio here as a 32-bit float WAV at its rate
 let detecting = false, maxMb = null;
+// on the public site an upload is a guest's: it lives only while a page of this browser is open, so this
+// page checks in like the upload page does (every guest_ping_s, and once more when it closes)
+const TAB = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let PUBLIC = false;
+const alive = () => fetch("api/alive", {method: "POST", headers: {"Content-Type": "application/json"},
+  body: JSON.stringify({tab: TAB}), keepalive: true}).catch(() => {});
+fetch("api/meta").then(r => r.json()).then(m => {
+  if (!m.public) return;
+  PUBLIC = true;
+  $("detect").title = "send this file to the server: the zero-shot model detects calls on it. It is yours only, and it is "
+    + `deleted when you close this site (or after ${+(+m.guest_quiet_min).toFixed(1)} minutes without contact)`;
+  $("detnote").textContent = "detect calls is the one exception: it sends the file (the original bytes if unedited, else the "
+    + "edit as a 32-bit float WAV) to the server, where the zero-shot model runs on it. Only you can see it; it is deleted "
+    + "when you close this site and is not used to train the models.";
+  setInterval(alive, 1000 * (m.guest_ping_s || 60));
+  alive();
+  addEventListener("pagehide", () => {
+    try { navigator.sendBeacon("api/leave", new Blob([JSON.stringify({tab: TAB})], {type: "text/plain"})); } catch {}
+  });
+  addEventListener("pageshow", e => { if (e.persisted) alive(); });
+}).catch(() => {});
 function upload(blob, name, onProgress) {
   return new Promise((ok, bad) => {
     const x = new XMLHttpRequest();
-    x.open("POST", `api/upload?name=${encodeURIComponent(name)}`);
+    x.open("POST", `api/upload?name=${encodeURIComponent(name)}` + (PUBLIC ? `&tab=${encodeURIComponent(TAB)}` : ""));
     x.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
     x.onload = () => {
       let j;

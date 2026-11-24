@@ -28,6 +28,10 @@ Fit and test (whole recordings held out, as box_refine.py does):
           prove it right. Positives only: an unticked top-5 name may still be calling.
 Too few labels (MIN) or no name named in two recordings: kept, with the reason.
 
+Recordings (review_sources.py, --uploads-dir): the survey's and the scanned audio added in the app.
+A box with no audio here and no cached embedding (a survey box on the server, which has no
+dataset/) is left out, with a count; the cache is built where the audio is.
+
 Writes data/review/calibration/species.json + species_protos.npy (review_app.py reads both at start),
 species_eval.csv (one row per held-out evaluation row) and species_tau.csv (MRR per tau, all recordings).
 """
@@ -313,6 +317,22 @@ def build_rows(species: pd.DataFrame, log_rows: list[dict], lane_group, zero_key
     return pd.DataFrame(rows), boxes
 
 
+def embeddable(rows: pd.DataFrame, boxes: list, audio: dict, cache: BE.EmbeddingCache
+               ) -> tuple[pd.DataFrame, list, tuple[int, int] | None]:
+    """Keeps the boxes that can be embedded here: audio present or the embedding cached (the server
+    has no dataset/ audio: survey boxes come from the cache). -> (rows, boxes renumbered, (boxes,
+    rows) left out or None)."""
+    ok = np.array([rec in audio or cache.get(BE.box_key(rec, box)) is not None for rec, box in boxes], bool)
+    if ok.all():
+        return rows, boxes, None
+    new = np.cumsum(ok) - 1
+    keep = ok[rows["box"].to_numpy(int)]
+    out = rows[keep].copy()
+    out["box"] = new[out["box"].to_numpy(int)]
+    return (out.reset_index(drop=True), [b for b, k in zip(boxes, ok, strict=True) if k],
+            (int((~ok).sum()), int((~keep).sum())))
+
+
 def main() -> int:
     import review_labels as L  # here, not at the top: review_app imports this module
     R = L.R
@@ -328,12 +348,15 @@ def main() -> int:
         ap.add_argument(f"--min-{k.replace('_', '-')}", type=int, default=v, help=f"default {v}")
     ap.add_argument("--boot", type=int, default=BOOT)
     ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--uploads-dir", type=Path, default=L.SRC.SA.UPLOADS_DIR, help="audio added in the app")
     args = ap.parse_args()
     mins = {k: getattr(args, f"min_{k}") for k in MIN}
 
+    src = L.SRC.Sources(args.uploads_dir)
+    print(src.describe())
     log_rows = L.read_csv_rows(args.log)
     lab = L.labels_from_logs(log_rows, L.read_csv_rows(args.audit), L.read_csv_rows(args.shown),
-                             L.read_csv_rows(args.species_shown))
+                             L.read_csv_rows(args.species_shown), src)
     species = pd.DataFrame(lab["species"], columns=L.SPECIES_COLS)
     names, memo = L.Names(), {}
 
@@ -343,15 +366,20 @@ def main() -> int:
             memo[n] = name_key(n, x["canonical"], x["rank"])
         return memo[n]
     rows, boxes = build_rows(species, log_rows, R.lane_group, zero_key)
+    cache, audio = BE.EmbeddingCache(args.cache), src.audio()
+    rows, boxes, n_out = embeddable(rows, boxes, audio, cache)
+    if n_out:
+        print(f"left out: {n_out[0]} boxes ({n_out[1]} named rows) with no audio here and no cached embedding")
     print(f"{len(rows)} named rows on {len(boxes)} boxes, {rows['recording'].nunique() if len(rows) else 0} recordings")
     X = np.zeros((0, BE.DIM), np.float32)
     if boxes:
-        X = BE.embed_boxes(boxes, BE.BoxEmbedder(BE.PerchSpatial(args.device)), BE.EmbeddingCache(args.cache),
-                           progress=True)
+        X = BE.embed_boxes(boxes, BE.BoxEmbedder(BE.PerchSpatial(args.device, wavs=audio), starts=src.window_starts()),
+                           cache, progress=True)
     D = Data.make(rows if len(rows) else pd.DataFrame(columns=["box", "recording", "group", "key", "name", "eval",
                                                                "zero", "canonical", "rank"]), X)
     spec, P, ev_df, tau_df = fit(D, mins, args.boot, args.seed)
-    spec = dict(version=dt.datetime.now().isoformat(timespec="seconds"), **spec, log=str(args.log))
+    spec = dict(version=dt.datetime.now().isoformat(timespec="seconds"), **spec, log=str(args.log),
+                added_recordings=len(src.uploads), left_out_boxes=n_out[0] if n_out else 0)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "species.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
     np.save(args.out / "species_protos.npy", P.astype(np.float32))

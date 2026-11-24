@@ -50,8 +50,11 @@ sudo -u "$RUNAS" "$APP/.venv-perch/bin/python" -c "import onnxruntime, numpy, pa
 
 echo "== service"
 cp "$APP/deploy/callfinder.service" /etc/systemd/system/callfinder.service
+cp "$APP/deploy/natgeo-train.service" "$APP/deploy/natgeo-train.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable callfinder
+systemctl enable --now natgeo-train.timer      # weekly refit of the learners (scripts/weekly_train.py)
+systemctl list-timers natgeo-train.timer --no-pager
 systemctl restart callfinder
 for _ in $(seq 1 90); do
     journalctl -u callfinder --since "-3 min" --no-pager | grep -q "website at" && break

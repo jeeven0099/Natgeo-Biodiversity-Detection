@@ -1,0 +1,13 @@
+# systemd timer for natgeo-train.service: /etc/systemd/system/natgeo-train.timer
+#   sudo systemctl daemon-reload && sudo systemctl enable --now natgeo-train.timer
+#   systemctl list-timers natgeo-train.timer          # next run
+# Persistent: a run missed while the server was off happens at the next boot.
+[Unit]
+Description=Weekly refit of the Call Finder learners
+
+[Timer]
+OnCalendar=Sun *-*-* 03:00:00 Asia/Singapore
+Persistent=true
+
+[Install]
+WantedBy=timers.target

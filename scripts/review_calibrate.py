@@ -1,7 +1,8 @@
 """Learner 1: per-lane thresholds and box-tightening settings, fitted to the review labels.
 
 CPU only. Reads the review logs (through review_labels.py), segment_scores.csv (+ the
-EarthChirp lanes) and cell_maps.npy. Writes recommendations to data/review/calibration/;
+EarthChirp lanes) and cell_maps.npy, with the scans of the audio added in the app behind them
+(review_sources.py, --uploads-dir). Writes recommendations to data/review/calibration/;
 nothing is applied: the viewer and the app keep perch_viewer.THRESHOLDS / KAPPA / ROW_SUPPORT
 until someone edits them.
 
@@ -364,13 +365,16 @@ def main() -> int:
         ap.add_argument(f"--min-{k}", type=int, default=v, help=f"support needed before fitting (default {v})")
     ap.add_argument("--boot", type=int, default=BOOT)
     ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--uploads-dir", type=Path, default=L.SRC.SA.UPLOADS_DIR, help="audio added in the app")
     args = ap.parse_args()
     mins = {k: getattr(args, f"min_{k}") for k in MIN}
 
-    lab = L.labels_from_logs(L.read_csv_rows(args.log), [], L.read_csv_rows(args.shown))   # positives only
+    src = L.SRC.Sources(args.uploads_dir)
+    print(src.describe())
+    lab = L.labels_from_logs(L.read_csv_rows(args.log), [], L.read_csv_rows(args.shown), sources=src)   # positives only
     taxon = pd.DataFrame(lab["taxon"], columns=L.TAXON_COLS)
     box = pd.DataFrame(lab["box"], columns=L.BOX_COLS)
-    seg = pv.load_segments(R.PDIR)
+    seg = src.segments()
     current = {g: t for g, t in pv.THRESHOLDS.items() if f"prob_{g}" in seg}
     taxon = taxon[taxon["recording"].isin(set(seg["recording"]))]
     units = threshold_units(taxon, seg, list(current))
@@ -380,8 +384,9 @@ def main() -> int:
     cur_box = (pv.KAPPA, pv.ROW_SUPPORT)
     if cur_box[0] not in KAPPAS or cur_box[1] not in ROW_SUPPORTS:
         raise SystemExit(f"current box setting {cur_box} is not on the grid")
-    if pv.CELL_FILE.exists() and len(pipeline_boxes(box)):
-        iou = box_ious(box.sort_values("recording"), cell_sub_of(pv.CellMaps(R.PDIR)))
+    cells = src.cell_maps() if len(pipeline_boxes(box)) else None
+    if cells is not None:
+        iou = box_ious(box.sort_values("recording"), cell_sub_of(cells))
     else:
         iou = pd.DataFrame(columns=IOU_COLS)
     bset = calibrate_boxes(box, iou, cur_box, mins, args.boot, args.seed)

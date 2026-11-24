@@ -90,8 +90,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-
       <input type="file" id="file" accept="audio/*,.wav,.flac,.ogg,.mp3,.aif,.aiff" hidden>
     </div>
     <label class="inl small" style="align-items:flex-start"><input type="checkbox" id="agree" style="margin-top:3px">
-      <span>I may share this recording. It is stored on this server so invited reviewers can check the detections and
-        improve the models. Anyone with its private link can open it, and I can delete it at any time.</span></label>
+      <span>I may share this recording. It stays on this server only while this page is open: it is deleted when I close
+        the page, or after <span class="quietmin">10</span> minutes without contact (for example if my computer sleeps).
+        No one else can see it, and it is not used to train the models.</span></label>
     <div id="addstat" class="small" style="margin-top:8px"></div>
     <div class="bar" id="upbar" hidden><i></i></div>
     <div id="newlink" hidden>
@@ -103,7 +104,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-
   <section class="card">
     <h2>Your uploads</h2>
     <div id="uploads"><div class="empty">…</div></div>
-    <div class="small" style="margin-top:6px">This browser remembers your uploads. Elsewhere, open an upload's private link.</div>
+    <div class="small" style="margin-top:6px">Your uploads are kept only while this page is open (reloading it keeps them).
+      When you close it they are deleted, and so are they after <span class="quietmin">10</span> minutes without contact.</div>
   </section>
 
   <section class="card" id="viewer" hidden>
@@ -132,7 +134,7 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-
     <div style="margin-top:10px"><b>Model's top 5</b> <span class="small" id="scorename"></span></div>
     <div id="topwrap"></div>
     <details id="allwrap" hidden><summary>Perch's top 5 over all its classes (if the group looks wrong)</summary><div id="topall"></div></details>
-    <div style="margin-top:12px">
+    <div style="margin-top:12px" id="flagwrap">
       <textarea id="flagtxt" rows="2" maxlength="500" placeholder="optional: what is wrong? (e.g. it is a car, not a bird)"></textarea>
       <div class="row" style="margin-top:6px"><button id="flag">this looks wrong</button><span id="flagstat" class="small"></span></div>
     </div>
@@ -177,9 +179,35 @@ async function refreshMeta() {
       + "Longer files: cut them into parts in the audio editor."
     : "Uploads are switched off on this server at the moment.";
   $("pick").disabled = !canUpload();
+  document.querySelectorAll(".quietmin").forEach(e => { e.textContent = String(+(+META.guest_quiet_min).toFixed(1)); });
   if (!$("lanes").childElementCount) fillLanes();
   renderUploads();
 }
+
+// ---------------- guest session: the uploads live only while a page of this browser is open ----------------
+// every page (tab) checks in each META.guest_ping_s and says when it closes; the server ends the session
+// a little after its last page closed (a reload checks in again in time) or when check-ins stop
+const TAB = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+let pingTimer = 0;
+function alive() {
+  return fetch("api/alive", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({tab: TAB}), keepalive: true})
+    .then(r => r.json()).catch(() => ({}));
+}
+function startPings() {
+  if (pingTimer) return;
+  pingTimer = setInterval(alive, 1000 * ((META && META.guest_ping_s) || 60));
+  alive();
+}
+addEventListener("pagehide", () => {
+  // text/plain: a beacon may not carry a non-safelisted type in some browsers; the server reads the body as JSON anyway
+  try { navigator.sendBeacon("api/leave", new Blob([JSON.stringify({tab: TAB})], {type: "text/plain"})); } catch {}
+});
+addEventListener("pageshow", async e => {          // back from the browser's page cache: check in, then reload the list
+  if (!e.persisted) return;
+  await alive();
+  try { await refreshMeta(); } catch {}
+  if (REC && !META.recordings.some(r => r.id === REC.id)) closeRec();
+});
 // none left today: the button is off (the server refuses anyway); a reload after midnight turns it back on
 const canUpload = () => !!META && META.can_add && !(META.uploads_left_today != null && META.uploads_left_today <= 0);
 let SCANS = [];
@@ -192,13 +220,13 @@ function renderUploads() {
   const rows = META.recordings.map(r => `<div class="u${REC && REC.id === r.id ? " cur" : ""}">
       <div><div class="name">${esc(r.name)}</div>
         <div class="small">${mmss(r.duration_s, 0)} · ${nBoxes(r.counts)} boxes in the ticked groups · added ${esc(String(r.added_at).replace("T", " ").slice(0, 16))}</div></div>
-      <div class="acts"><button data-open="${esc(r.id)}">open</button><button data-link="${esc(r.link)}" title="copy the private link">copy link</button>
-        <button data-del="${esc(r.id)}" data-name="${esc(r.name)}" title="delete the file and its detections from the server">delete</button></div></div>`);
+      <div class="acts"><button data-open="${esc(r.id)}">open</button>${r.link ? `<button data-link="${esc(r.link)}" title="copy the private link">copy link</button>` : ""}
+        <button data-del="${esc(r.id)}" data-name="${esc(r.name)}" data-guest="${r.guest ? 1 : ""}" title="delete the file and its detections from the server">delete</button></div></div>`);
   const prow = pending.map(j => `<div class="u"><div><div class="name">${esc(j.name || j.rec)}</div>
       <div class="small ${j.state === "error" ? "err" : ""}">${esc(scanText(j))}</div>
       ${j.state === "running" && j.total ? `<div class="bar"><i style="width:${100 * j.done / j.total}%"></i></div>` : ""}</div>
       <div class="acts">${j.link ? `<button data-link="${esc(j.link)}">copy link</button>` : ""}
-        <button data-del="${esc(j.rec)}" data-name="${esc(j.name || j.rec)}">delete</button></div></div>`);
+        <button data-del="${esc(j.rec)}" data-name="${esc(j.name || j.rec)}" data-guest="${j.link ? "" : 1}">delete</button></div></div>`);
   $("uploads").innerHTML = prow.concat(rows).join("");
 }
 const scanText = j => j.state === "queued" ? `waiting to be scanned${j.position > 1 ? `: ${j.position - 1} file${j.position > 2 ? "s" : ""} ahead` : ""}`
@@ -212,7 +240,8 @@ $("uploads").addEventListener("click", async e => {
   if (b.dataset.open) openRec(b.dataset.open);
   else if (b.dataset.link) copyText(absLink(b.dataset.link), b);
   else if (b.dataset.del) {
-    if (!confirm(`Delete "${b.dataset.name}" and its detections from the server? Its private link stops working. This cannot be undone.`)) return;
+    if (!confirm(b.dataset.guest ? `Delete "${b.dataset.name}" and its detections from the server now? (It is deleted anyway when you close this page.)`
+                                 : `Delete "${b.dataset.name}" and its detections from the server? Its private link stops working. This cannot be undone.`)) return;
     b.disabled = true;
     try {
       await post("api/delete", {rec: b.dataset.del});
@@ -237,7 +266,7 @@ const say = h => { $("addstat").innerHTML = h; };
 function upload(file, onProgress) {
   return new Promise((ok, bad) => {
     const x = new XMLHttpRequest();
-    x.open("POST", `api/upload?name=${encodeURIComponent(file.name)}`);
+    x.open("POST", `api/upload?name=${encodeURIComponent(file.name)}&tab=${encodeURIComponent(TAB)}`);
     x.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     x.onload = () => {
       let j;
@@ -263,8 +292,9 @@ async function addFile(file) {
     const r = await upload(file, p => { bar.firstElementChild.style.width = `${100 * p}%`; say(`uploading ${esc(file.name)} ${Math.round(100 * p)}%`); });
     say(r.created ? `${esc(file.name)} uploaded: the models are scanning it (see Your uploads).`
                   : `This file was uploaded before: opening it.`);
-    $("newlinkv").value = absLink(r.link);
-    $("newlink").hidden = false;
+    if (r.link) { $("newlinkv").value = absLink(r.link); $("newlink").hidden = false; }
+    else $("newlink").hidden = true;
+    startPings();
     WANT = r.rec;
     await refreshMeta();
     pollScans();
@@ -496,6 +526,7 @@ function selectBox(b) {
     : b.reviewed === "unknown" ? "A reviewer could not tell." : "Not checked by a reviewer yet.";
   $("binfo").innerHTML = `${esc(b.model)} scored ${fmt(b.max_score, 3)} (threshold ${b.threshold}) over ${b.n} window${b.n === 1 ? "" : "s"}. ${rv}`;
   $("flagtxt").value = ""; $("flagstat").textContent = ""; $("flag").disabled = false;
+  $("flagwrap").hidden = !!(REC && REC.guest);      // reviewers never see a guest's upload: nothing to flag to
   predict();
 }
 async function predict() {
@@ -584,6 +615,7 @@ document.addEventListener("keydown", e => {
   try { await refreshMeta(); }
   catch (e) { $("uploads").innerHTML = `<div class="err">The server did not answer: ${esc(e.message)}</div>`; return; }
   makeLut();
+  startPings();
   const want = new URLSearchParams(location.search).get("rec");
   if (want && META.recordings.some(r => r.id === want)) await openRec(want);
   else if (want) WANT = want;      // still scanning: opened when done

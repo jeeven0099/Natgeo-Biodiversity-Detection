@@ -24,6 +24,8 @@ dropped by the cap. AUROC P vs N (positives vs the "no" segments) is reported, n
 the "no" boxes are mostly where the zero-shot score was over its threshold, which biases that
 comparison against the zero-shot score.
 
+Recordings (review_sources.py, --uploads-dir): the survey caches' and the scanned audio added in the
+app, whose scan rows go behind the caches' as the app puts them there.
 Features of a segment, read from caches (no Perch run): the mean of the L2-normalised Perch
 embeddings of the 5 s windows over the segment (earthchirp_embeddings.npy is exactly Perch's window
 embedding; the windows are review_app.windows_for_span's), L2-normalised again; and the zero-shot
@@ -482,10 +484,13 @@ def main() -> int:
     ap.add_argument("--no-segments", action="store_true", help="skip taxon_segments.csv")
     ap.add_argument("--positives-only", action="store_true",
                     help="ignore the 'no' answers (they fall back to unlabelled): the 2026-11-17 fit")
+    ap.add_argument("--uploads-dir", type=Path, default=L.SRC.SA.UPLOADS_DIR, help="audio added in the app")
     args = ap.parse_args()
     mins = {k: getattr(args, f"min_{k}") for k in MIN}
 
-    lab = L.labels_from_logs(L.read_csv_rows(args.log), [])          # no audit file: no audit gaps
+    src = L.SRC.Sources(args.uploads_dir)
+    print(src.describe())
+    lab = L.labels_from_logs(L.read_csv_rows(args.log), [], sources=src)   # no audit file: no audit gaps
     taxon = pd.DataFrame(lab["taxon"], columns=L.TAXON_COLS)
     lab01 = taxon["label"].astype(int)
     no = (lab01 == 0) & (taxon["reason"] == "decision")              # a reviewer's "no" on a box of the lane
@@ -493,7 +498,7 @@ def main() -> int:
     n_no = int((taxon["label"].astype(int) == 0).sum())
     print(f"{int((taxon['label'].astype(int) == 1).sum())} positive taxon labels, {n_no} 'no' labels"
           + (" (ignored: --positives-only)" if args.positives_only else ""))
-    win = Windows.from_disk()
+    win = src.windows()
     spec_groups, params, evs = {}, {}, []
     for g in args.groups:
         lane = default_lane(g)
@@ -533,7 +538,7 @@ def main() -> int:
                 features="mean of L2-normalised Perch window embeddings over the segment, L2-normalised; "
                          "+ the default lane's zero-shot score (logit for Perch lanes)",
                 cs=list(CS), cap=args.cap, outer_folds=OUTER_FOLDS, inner_folds=INNER_FOLDS, minimum_support=mins,
-                log=str(args.log), groups=spec_groups)
+                log=str(args.log), added_recordings=len(src.uploads), groups=spec_groups)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "taxon.json").write_text(json.dumps(spec, indent=2, default=float), encoding="utf-8")
     np.savez(args.out / "taxon.npz", **{f"{g}__{k}": v for g, p in params.items() for k, v in p.items()})

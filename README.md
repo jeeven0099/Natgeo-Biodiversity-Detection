@@ -108,6 +108,7 @@ sections below.
 - [Learner 1: thresholds and box settings](#learner-1-thresholds-and-box-settings-from-the-reviews)
 - [Box refiner](#box-refiner-edges-on-the-fine-spectrogram-fitted-to-the-reviewers-boxes)
 - [Learners 2 and 3: taxon head and learned species names](#learners-2-and-3-taxon-head-and-learned-species-names)
+- [Weekly training](#weekly-training-weekly_trainpy)
 - [Common names for the top 5](#common-names-for-the-top-5)
 - [Why the class index exists](#why-the-class-index-exists)
 - [GPU setup (Windows)](#gpu-setup-windows)
@@ -1496,10 +1497,16 @@ There are three ways to add a file:
 ```
 .venv-perch\Scripts\python.exe -X utf8 scripts\scan_audio.py my_recording.wav other.flac
 .venv-perch\Scripts\python.exe -X utf8 scripts\scan_audio.py --check 3
+.venv-perch\Scripts\python.exe -X utf8 scripts\scan_audio.py --delete S01634_x-2 --reason "copy of a survey recording"
 ```
 
 Options: `--uploads-dir DIR`, `--review-dir DIR` (whose logs and top-5 cache count as taken names),
-`--device cpu`. `--check N` is the rebuild check below; it writes nothing.
+`--device cpu`. `--check N` is the rebuild check below; it writes nothing. `--delete REC ...` removes
+added recordings (audio, sidecar, scan) and writes one `deleted.csv` row each (recording, sha256,
+time, reason). It needs a non-blank `--reason` and takes nothing else (no files, no `--check`).
+If any id is not an added recording it deletes nothing and exits 1. A deleted id is never reused.
+Stop the app first: a running app keeps the recording in memory until its next start. The tests
+are in the website's unit test (`t_guest_unit.py`, the `--delete` rows below).
 
 **What happens to a file.**
 1. **Upload.** The file is streamed to disk while its sha256 is computed.
@@ -1639,8 +1646,10 @@ The tests found four faults, all fixed:
 
 `review_app.py --public` serves one app in two roles: a public page where anyone can upload a
 recording and see and hear the calls found in it, and the review app for invited reviewers. Only
-reviewers' answers are logged, so only they make labels. A visitor can flag a box as "looks wrong";
-a flag is a hint for reviewers, never a label.
+reviewers' answers are logged, so only they make labels. A visitor's upload is a **guest upload**:
+private to that visitor, deleted when they close the page, never shown to reviewers and never
+trained on. A visitor who opens a reviewer's private link can flag a box as "looks wrong"; a flag
+is a hint for reviewers, never a label.
 
 ```
 browser ──HTTPS──> Caddy (example.org) ──> review_app.py --public on 127.0.0.1:8765
@@ -1650,21 +1659,51 @@ browser ──HTTPS──> Caddy (example.org) ──> review_app.py --public on
 ```
 
 **Roles.**
-- **Public** (`/`, `/api/...`, `/u/<key>`, `/editor`): upload, the scan queue, and the visitor's own
-  uploads only: their spectrogram, model boxes, top 5, playback, flag and delete. No survey recording
-  is served (its boxes and spectrogram are 404), and nothing public carries a path, a reviewer's name
-  or learner state. A box a reviewer has answered shows `yes` with its species, or `no`.
+- **Public** (`/`, `/api/...`, `/u/<key>`, `/editor`): upload, the scan queue, and what this
+  browser may see: its own guest uploads and any upload whose private link it opened. For those it
+  serves the spectrogram, model boxes, top 5, playback and delete, plus flag on a linked upload.
+  No survey recording is served (its boxes and spectrogram are 404), and nothing public carries a
+  path, a reviewer's name or learner state. A box a reviewer has answered shows `yes` with its
+  species, or `no`.
 - **Reviewer** (`/review/...`): the full review app of the earlier sections. The name logged is the
   login's (`X-Reviewer`), never the one in the request body. Without the header the answer is 403.
-  Reviewers see the flag counts and every upload.
+  Reviewers see the flag counts and every upload except guests'. A guest's recording or box id
+  sent to `/review/api/...` (boxes, spectrogram, audio, box, top 5, export, log, audit) is 404.
 - Without `--public` the app is the local review app as before, with every request in the reviewer
   role.
 
-**Private links.** Each upload gets a key (`secrets.token_urlsafe(18)`) and the link `/u/<key>`.
-Opening it stores the key in the `uploads` cookie (HttpOnly, SameSite=Lax, Secure under HTTPS, a
-year, the newest 40 keys) and redirects to `/?rec=<name>`. A visitor sees what their cookie's keys
-name and nothing else; the link is how they open it on another device or share it. Responses carry
-`Referrer-Policy: no-referrer`, so a key never leaves in a Referer.
+**Guest uploads.** An upload from the public page or the public editor makes a session.
+- **Cookie:** `guest=<secrets.token_urlsafe(24)>`, HttpOnly, SameSite=Lax, Secure under HTTPS,
+  with no Max-Age, so the browser drops it when it closes. A sid the server did not make is never
+  adopted: a forged cookie gets a new session.
+- **Folder:** the session's files go in `data\uploads\guests\<sha256(sid)[:32]>\` (`audio\`,
+  `scans\`) as `guest-<12 hex>`. The sid itself is written nowhere. Another session uploading the
+  same bytes gets its own copy.
+- **Visibility:** only that cookie lists the uploads; anyone else gets 404. Reviewers do not see
+  them, and the reviewer routes refuse them. A guest upload has no link and no flag (nobody would
+  read the flag). Its top 5 is not cached, delete writes no `deleted.csv` row, and the server log
+  says "scanned a guest upload" without the id. Nothing of it reaches the logs, the labels or
+  weekly training.
+- **Check-ins:** each open page (upload page or editor) has a tab id. It posts `api/alive` every
+  60 s and once at load. On `pagehide` it sends `api/leave` with `navigator.sendBeacon`, as
+  `text/plain` so the browser always sends it; the server reads the body as JSON whatever its type.
+  Uploads carry `&tab=`.
+- **End:** a reaper runs every 15 s. It ends a session when no upload is arriving, no tab has checked
+  in within 10 min, and either a tab left over 30 s ago or nothing was heard for 10 min. A reload
+  sends leave and then a new tab's check-in within that 30 s, so it keeps the uploads. Ending forgets
+  the recordings (their score rows are released, so other recordings' row indices stay put) and
+  removes the folder.
+- **Restart:** a restart loads each `guests\` folder (32 lowercase hex characters) as a session
+  again, with a fresh 10 min. An open page keeps it with its next check-in; the others are removed.
+  A refused upload from a new visitor makes no cookie and leaves no folder.
+
+**Private links (reviewer uploads).** A reviewer's upload (from `/review/`) goes in the shared
+`data\uploads` folder, where reviewers review it like any added recording. It gets a key
+(`secrets.token_urlsafe(18)`) and the link `/u/<key>`, for example to show the recordist what was
+found. Opening the link stores the key in the `uploads` cookie (HttpOnly, SameSite=Lax, Secure under
+HTTPS, a year, the newest 40 keys) and redirects to `/?rec=<name>`; that browser can then view,
+flag and delete it. Responses carry `Referrer-Policy: no-referrer`, so a key never leaves in a
+Referer.
 
 **Limits** (the defaults; each is an option):
 
@@ -1672,7 +1711,7 @@ name and nothing else; the link is how they open it on another device or share i
 |---|---|---|
 | File size | 700 MB (`--max-upload-mb`; Caddy stops at 701 MiB) | 400, "the file is … MB; the limit is 700 MB: cut it into parts" |
 | Duration | 60 min (`--max-upload-min`) | 400, "… min long; the limit is 60 min: cut it into parts" |
-| New uploads | 10 per address per day (`--daily-uploads`); reviewers are not counted | 429, "10 uploads a day per address: please try again tomorrow" |
+| New uploads | 10 per address per day (`--daily-uploads`), guest uploads included; reviewers are not counted | 429, "10 uploads a day per address: please try again tomorrow" |
 | Uploads folder | 50 GB (`--disk-quota-gb`) | 507, "the site's storage for uploads is full" |
 | Free disk left after an upload | 2 GB (`--min-free-gb`) | 507, "the server's disk is nearly full" |
 | Flags | 200 per address per day; comment cut to 500 characters | 429 |
@@ -1686,18 +1725,25 @@ name and nothing else; the link is how they open it on another device or share i
   error messages carry no exception type.
 - **Bind:** the app listens on 127.0.0.1 only, so Caddy is the only way in.
 
-**What is kept for active learning.** Every upload stays in `data\uploads` (audio, sidecar with
-`via=website` or `via=reviewer` and its key, and the scan) until its owner deletes it. Flags go to
-`data\review\flags.csv`, with no reviewer or address column.
+**What is kept for active learning.** Only reviewer uploads stay, in `data\uploads` (audio, sidecar
+with `via=reviewer` and its key, and the scan), until they are deleted; reviewers' answers on them
+are logged as on any added recording. Guest uploads (sidecar `via=guest`, no key) last only as long
+as their session. Flags go to `data\review\flags.csv`, with no reviewer or address column.
+Recordings uploaded before guest sessions existed (sidecar `via=website`) stay in the shared folder
+as before, with their links.
 
-**Delete.** The owner can delete an upload from the page (it asks first). The audio, scan and
-sidecar are removed, a row (recording, sha256, time, reason) goes to `data\uploads\deleted.csv`,
-the link returns 404, and the name is never reused (the same file again becomes `E-2`). A delete
-during the scan purges the files when the scan ends.
+**Delete.**
+- **Guest upload:** the page offers delete, and its confirm says the file goes anyway when the page
+  closes. The audio, scan and sidecar are removed at once, and no `deleted.csv` row is written.
+- **Linked upload:** delete through the link asks first. It removes the same files, writes a row
+  (recording, sha256, time, reason `owner`) to `data\uploads\deleted.csv`, and the link returns 404.
+- **Server side:** `scan_audio.py --delete` does the same, with a reason.
+- **Both:** a deleted name is never reused (the same file again becomes `E-2`), and a delete during
+  the scan purges the files when the scan ends.
 
-**Dedup caveat.** The same bytes give the recording already added, so a second person who uploads
-an identical file gets the first upload's key, and with it the right to delete it. That is accepted:
-both of them hold the same audio.
+**Dedup caveat (reviewer uploads only).** The same bytes give the recording already added, so a
+second reviewer who uploads an identical file gets the first upload's key. That is accepted: both
+hold the same audio. Guests are not affected: each session keeps its own copy.
 
 **Adding needs the scan files.** At start the app checks every file a scan reads besides the audio
 (`scan_audio.missing_files()`): the Perch model, the cell head, EarthChirp's library, its ESC-50
@@ -1735,6 +1781,10 @@ after it was stored.
 4. **Reviewers:** one line per reviewer in `/etc/caddy/reviewers.caddy`, outside the repo:
    `<name> <hash>`, the hash from `caddy hash-password --plaintext '<password>'`. The name is what
    the log records. After an edit, `sudo systemctl reload caddy`.
+5. **Weekly training:** `deploy/natgeo-train.service` + `natgeo-train.timer` (`setup_server.sh`
+   installs and enables both) run `scripts/weekly_train.py` on Sundays at 03:00 Singapore time, beside
+   the app, and restart `callfinder` when a learner was swapped in. See
+   [Weekly training](#weekly-training-weekly_trainpy).
 
 `.gitattributes` keeps `*.sh` and everything in `deploy/` in Unix line endings in every checkout,
 so a copy taken from a Windows checkout runs under bash on the server.
@@ -1756,48 +1806,104 @@ All on scratch `--review-dir` / `--uploads-dir` copies, with
 `--max-upload-mb 4 --max-upload-min 0.75 --daily-uploads 3`; Caddy is simulated by the
 `X-Reviewer`, `X-Forwarded-For` and `X-Forwarded-Proto` headers.
 
-**Server test** (`t_public.py` in the scratchpad). Phase a, 79 checks, all pass:
+**Server test, v1** (key links for every upload, before guest sessions). Phase a had 79 checks and
+phase b 6, all passing. It is kept as `old/t_public_v1.py` in the scratchpad. v2 below replaces it.
+
+**Server test, v2** (`t_public.py` in the scratchpad, with guest sessions). Phase a, 80 checks, all
+pass:
 
 | Area | Checks |
 |---|---|
-| Routes | `/` is the public page with the security headers; `/editor` served; `/review` → `/review/` with the query kept; blank or missing `X-Reviewer` → 403; with it, the review page and meta with the login's name |
-| Public meta | no cookie: no recordings, 3 uploads left; no paths, names or learner state; survey boxes and spectrogram 404 |
-| Upload | 200 with `u/<key>`; cookie HttpOnly, SameSite=Lax, Secure under https, Path=/, a year; sidecar holds the key and `via=website`; queue positions numbered in order; the 4th new upload from one address 429 and 0 left; over 0.75 min "is 1.00 min long; the limit is 0.75 min"; 20.3 MB "the limit is 4 MB … cut it into parts"; unreadable audio 400; public errors have no exception type, reviewer errors keep it; same bytes → the existing key; refusals and dedup do not use the count; reviewer uploads are not counted (`via=reviewer`) |
-| Ownership | cookie A lists A only, with its link and no path; B's boxes, view audio and top 5 (also with a forged id) 404; A's boxes are model boxes only, the same as the reviewer sees, with exactly the public fields; top 5 runs on the tight span without `check_max_diff`; spectrogram PNG, over 120 s 400; `audio.wav` pad capped at 2 s, bad mode 400; `/api/box` has no taxon fields or history |
-| Links | `/u/<key>` 302 to `/?rec=` and sets the cookie, adds the key and drops unknown ones; unknown key 404; a malformed cookie gives no recordings and no error |
-| Flags and answers | flag own box 200; the `flags.csv` row has the comment cut to 500 and no reviewer or address; another's box 404; JSON over 64 KB 413; the reviewer sees the flag count; reviewer log 200 with the login's name, not the body's; public `/api/log` 404 and `/review/api/log` without login 403; the public box shows `yes` with species, `no` without |
-| Delete | another's 404; own 200 and the cookie loses the key; audio, scan, sidecar gone; `deleted.csv` row with reason `owner`; link and boxes 404 even with the old cookie; the reviewer list drops it (137 → 134 + 3); a delete right after upload purges the files mid-scan; the same file again → `E-2` |
+| Pages and roles | `/` has the security headers and the `api/alive` / `api/leave` calls; `/editor` is served with the same keepalive; `/review` → `/review/` with the query kept; blank or missing `X-Reviewer` → 403; reviewer meta has the login's name |
+| Public meta | no cookie: no recordings, `guest` false, 3 uploads left, ping 60 s, quiet 10 min; no paths, names or learner state; `api/alive` with no session says `guest: false` and sets no cookie |
+| Guest upload | A gets 200, a `guest-<12 hex>` id, no key and no link. The cookie is `guest=<32 chars>`: HttpOnly, SameSite=Lax, Secure under https, Path=/, no Max-Age or Expires. A sits in `guests/sha256(sid)[:32]`, its sidecar says `via=guest` with no key, and the sid is nowhere on disk. B and C use the same cookie and folder. Queue positions are numbered |
+| Limits | the 4th new upload from one address 429; over 0.75 min and over 4 MB refused with the limit; public errors carry the message only; unreadable audio 400; a refused upload from a new visitor sets no cookie and leaves no session folder |
+| Dedup | same bytes from the same guest give the same upload, not a new one. Another guest with a forged cookie gets a new session (the forged sid is not adopted) and a separate copy. Refusals and same-guest dedup do not use the count |
+| Reviewer upload | shared folder, `via=reviewer`, a key and `u/<key>` link; the server log says "scanned a guest upload" and names no guest id |
+| Visibility | guest 1 lists A, B, C with `guest` true, no link and no path; guest 2 lists its own copy only, in meta and scans. A's boxes have exactly the public fields, and the same bytes give the same boxes in both sessions. Guest 2's top 5 on guest 1's box is 404; guest 1's is 5 names. A guest's box writes no `prediction_cache` row. Own spectrogram and box audio served |
+| Reviewers | reviewer meta and scans list no guest recording; reviewer log, drawn box and audit on a guest's 404, with the log unchanged; a flag on a guest's own box 400 ("reviewers do not see it") with no `flags.csv` |
+| Keyed upload | `/u/<key>` 302 and sets the key cookie; both cookies list the keyed upload, then the guest's; flag 200 with one `flags.csv` row cut to 500; reviewer log 200 with the login's name; the public box shows `yes` and the species |
+| Delete | guest 2 deleting guest 1's 404; guest 1 deletes C: its audio, sidecar and scan gone, no `deleted.csv`; C's boxes 404 for its guest and for reviewers; B's boxes and top 5 unchanged after the rows are released; guest 2's copy unchanged; a delete right after upload purges the files mid-scan; the keyed upload's delete writes a `deleted.csv` row with reason `owner` and its link 404s |
+| Close and reload | alive from guest 2 says `guest` true. A reloaded page's alive keeps the session. A closed page (a `text/plain` leave beacon) loses its folder after the grace (>10 s). The ended session gives no recordings, `guest` false and boxes 404. A reloaded session outlives the grace. The log says "guest session ended: 1 upload(s) removed" |
 
-Phase b, after a restart, 6 checks, all pass: A's link works and meta lists A; C's and E's links
-still 404 and the deleted recordings are not back; the daily counts are cleared. Both phases were
-rerun after the scan-files guard, all pass.
+Phase b, after a restart, 9 checks, all pass. The log says "guest sessions from the last run: 3
+(3 uploads, 0 to scan)", and guest 1's cookie lists A and B again, with A's boxes as before. Alive
+keeps the session. Reviewers still see no guest recording, and a guest's reviewer boxes 404. The
+deleted keyed upload and its link stay gone. The daily counts are cleared, and guest 1's leave then
+removes its folder.
+
+**Quiet sessions after a restart.** The phase b server was left running, and the two sessions that
+never checked in were removed by the real reaper at 10 minutes. The log showed "guest session
+ended: 1 upload(s) removed" and "… 0 upload(s) removed", seen after 546 s of watching.
+
+**Unit test** (`t_guest_unit.py`, no server, no Perch), 52 checks, all pass:
+
+| Area | Checks |
+|---|---|
+| Row release (8) | a wrong start or length is refused and the base is never released; the part appended first can be released; released rows read as zeros with the length and other rows unchanged, and hold no memory; an append afterwards keeps the indices; releasing twice is fine |
+| Uploads (6) | `receive` with a given id keeps the visitor's file name; same bytes in the same folder give that recording; a taken id becomes `-2`, never overwritten; `delete(log=False)` removes the files with no `deleted.csv`; `remove_all` removes the folder, and is fine on a missing one |
+| `scan_audio.py --delete` (7) | refused without `--reason`, with a blank one, or with `--check` (exit 2, nothing deleted); an unknown id gives exit 1 and deletes nothing; two deleted with exit 0 and the third kept; two `deleted.csv` rows with sha256 and the reason; a deleted id is not reused by a later upload |
+| Sessions (4) | a 32-character sid, folder `sha256(sid)[:32]`; the sid is not the folder name; an unknown sid is not adopted; creating with one gives a new random sid |
+| Reaper (14) | quiet: kept at 599 s, ended after 600 s, and a later ping says so; leave: kept within the 30 s grace, ended after it; a reload (leave then a new tab) is kept and ends when the new tab goes quiet; two tabs, one closes: kept, then the other closes: ended after the grace; never ended while an upload is arriving, the quiet time applies once it is in; tabs capped at 20 (oldest dropped); tab ids cut to 64 characters; a ping with no tab adds no tab and does not move `seen` |
+| Restart (3) | a 32-hex folder is a session again with its upload listed; other folders are left alone; it is kept for the quiet time, then removed |
+| Upload path (10) | a refused upload from a new visitor ends the session made for it and removes its folder; a `guest-<12 hex>` id with no key, in the session's folder; sidecar `via=guest`, no key, the file name; the upload pings its tab; a refused upload in an existing session keeps the session; same bytes and guest give the same upload, not queued again; another guest gets a separate copy; `is_guest` on a recording, a box id and `new\|rec`, not a survey id; over the size limit refused with the folder unchanged; with guests off (not `--public`) refused before any session is made |
 
 **Storage test** (`t_site.py`), 5 checks, all pass: a missing uploads folder allows a small file; a
 quota of 6,000 bytes with 5,000 used allows 1,000 more and refuses 1,001 (507, "the site's storage
 for uploads is full"); `min_free` above the free disk → 507 ("the server's disk is nearly full");
 `min_free` 0 allows.
 
-**Browser test** (`ui_public.mjs`, headless Chrome over CDP), 48 checks, all pass:
+**Browser test, v1** (`old/ui_public_v1.mjs`, key links and flags): 48/48. v2 below replaces it.
+
+**Browser test, v2** (`ui_public.mjs`, headless Chrome over CDP, with guest sessions), 53 checks,
+all pass:
 
 | Area | Checks |
 |---|---|
-| Page | title; no survey recordings; "Up to 4 MB and 0.75 min … 3 of 3 uploads left today"; groups named for people; a survey `?rec=` opens nothing |
-| Refusals | no upload without the consent tick; a 5 MB file refused in the browser; a 1-minute file refused by the server with no "Error:" prefix; neither uses the count |
-| Upload | progress, the scan state, an absolute `/u/` link; A opens by itself (`?rec=A`); 2 uploads left |
-| Viewer | spectrogram not flat; "A.wav · 0:20"; box list, box card and top 5; all groups ticked lists 4 rows; a click on the canvas selects the box under it |
+| Page | title; no survey recordings; the limits text from the server; "No uploads yet" with the viewer hidden; groups named for people; a survey `?rec=` opens nothing |
+| Refusals | no upload without the consent tick; over 4 MB refused in the page with nothing sent; too long refused by the server with no type name, without using the count |
+| Guest upload | progress and the scan state shown; A gets a `guest-<12 hex>` id and `META.guest`; no private link; A opens by itself at `?rec=<its id>`; the list shows A with open and delete, marked guest; the note says uploads are kept only while the page is open, with 10 min; the page POSTs `api/alive`; A is in one guest folder and not the shared one; 2 uploads left |
+| Viewer | spectrogram not flat; name · length; one minute listed; the box list matches the shown boxes; box card and top 5; all groups ticked lists every box; a click on the canvas selects the box under it |
 | Sound | play call (band-passed), original, P plays the minute and P again stops, ▶ at a top-5 name plays its 5 s window |
-| Flag | sent, button off, a row in `flags.csv` |
-| Settings | colour map and contrast remembered; no groups ticked lists no boxes; after reload the groups, colours and contrast are kept and A reopens; consent is asked again after a reload |
-| Queue and limit | "detecting calls: n/8 windows" while waiting; at 0 left "choose a file…" is off; the 4th upload says "3 uploads a day per address: please try again tomorrow", with no "Error:" prefix |
-| Links and delete | a browser with no cookie lists nothing; the private link opens A only; delete asks first, closes the viewer, and the link then returns 404 |
-| Layout | 390 px wide with no horizontal scroll; dark mode background rgb(22, 22, 21); no page errors |
+| No flag | the flag box is hidden on a guest's box, and `flags.csv` has no rows |
+| Settings | colour map and contrast remembered; no groups ticked lists no boxes; a reload sends `api/leave` (text/plain) and keeps the upload; after it the groups, colours and contrast are kept and A reopens; consent is asked again |
+| Queue and limit | the queue text (a file ahead / detecting); at 0 left "choose a file…" is off; the 4th upload gives the daily limit message with no "Error:" prefix; three uploads listed |
+| Delete | asks first and says closing deletes it anyway; closes the viewer with B and D still listed; A's files gone from the guest folder, with no `deleted.csv` |
+| Leaving | navigating away removes the guest folder after the grace (33 s in the run); back on the page there are no uploads and no session, and the old `?rec=` opens nothing |
+| Layout | 390 px wide with no horizontal scroll; dark mode background; no page errors |
+
+**How the leave beacon is checked.** DevTools (`Network.requestWillBeSent`) does not report a
+`sendBeacon` sent while the page unloads. The test therefore wraps `navigator.sendBeacon` and
+records its calls in `sessionStorage`; the reload check reads "api/leave text/plain;" from there.
+The server side of the beacon shows in the folder being removed 33–44 s after leaving, which is the
+30 s grace plus the 15 s reaper step.
+
+**Public editor test** (`ui_editor_public.mjs`, headless Chrome, `/editor` on the public server),
+8 checks, all pass. The note and the button title use the guest wording ("Only you can see it; it
+is deleted when you close this site and is not used to train the models.", "… (or after 10 minutes
+without contact)"), and the editor POSTs `api/alive`. Detect calls gives a guest upload and an
+`./?rec=guest-…` link, and the upload carries `&tab=<uuid>`. The files are in a new guest folder.
+The link opens the upload on the public page in the same browser. Leaving removes the folder in
+35 s, and there are no page errors.
+
+**Reruns after the guest change** (local mode unless noted): `t_site.py` 5/5, `ui_addaudio.mjs`
+25/25, `ui_editor.mjs` 54/54.
+
+Changes made while testing guests (one fault, two adjustments):
+- **Orphan session on a refused upload.** A first upload that was refused (too long, too big,
+  unreadable) left an empty session folder until the reaper. Such a session now ends at once, and
+  no cookie is sent.
+- **Beacon type.** The leave beacon is sent as a `text/plain` Blob, a type every browser accepts
+  for `sendBeacon`; the server reads only the tab id from it.
+- **Editor note in local mode.** Its last sentence now reads "Answers given there are logged as
+  usual, and the learners count them like any upload's".
 
 **Server-shaped copy.** The server files above copied to a scratch folder (1.1 GB, no audio but
 the test uploads), run on CPU:
 - **Without the ESC-50 files:** the start prints "adding audio is off: a scan needs
   data\insecta_compare\esc50_emb.npy, data\insecta_compare\esc50_meta.csv"; public `can_add` is
   false; an upload is refused at once (400, no type prefix) and nothing is stored.
-- **With them:** `ui_public.mjs` 48/48. Three scans of 8 windows took 3.0–3.5 s each, with Perch and
+- **With them:** `ui_public.mjs` (v1) 48/48. Three scans of 8 windows took 3.0–3.5 s each, with Perch and
   the cell head on `CPUExecutionProvider`.
 - **Reviewer side with no survey audio:** `/review/api/meta` lists 0 recordings, so survey
   recordings without their WAV are left out rather than shown broken; a survey recording's items
@@ -1845,9 +1951,13 @@ are `review_calibrate.py` (thresholds, box settings), `box_refine.py` (box edges
 - `--shown`: the shown-box log (default `data\review\box_shown.csv`; a missing file is fine).
 - `--species-shown`: the shown-names log (default `data\review\species_shown.csv`; a missing file
   is fine, and every row then reads as having shown no learned name).
+- `--uploads-dir`: audio added in the app (default `data\uploads`; see
+  [Weekly training](#weekly-training-weekly_trainpy) for which added recordings count).
 
-**Which rows count.** Rows of recordings outside `dataset\` (audio added in the app, see
-[New audio](#new-audio-detect-calls-on-a-file-you-add)) are left out; the run prints how many.
+**Which rows count.** Since 2026-11-23, rows of the survey recordings (the long-form caches and
+`dataset\`) and of scanned uploads ([New audio](#new-audio-detect-calls-on-a-file-you-add)) count.
+Rows of a deleted upload, an unscanned one, or an upload sharing its name with a survey recording
+are left out; the run prints how many. Added audio has no split, so its rows carry split `""`.
 Of the rest, only the newest row of each box or window counts, as in the app. `unknown` gives no
 label of any kind: it is withheld, not negative. A row that says `no` for a group while naming a
 species of that same group contradicts itself, so it is withheld too. Both go to `withheld.csv`
@@ -2778,6 +2888,163 @@ earlier outputs were backed up first): exit 0. Amphibia, Anthropogenic, Aves and
 `segments` equal `taxon_segments.csv` on a real recording for all 4 groups. `annotation_log.csv`,
 `box_shown.csv`, `raven_plan.csv` and `species_shown.csv` are unchanged (sha256).
 
+## Weekly training (`weekly_train.py`)
+
+`scripts/weekly_train.py` refits the app's learners on the week's reviews and swaps a refit in only
+when it keeps everything the live one has. On the server, `deploy/natgeo-train.timer` runs it on
+Sundays at 03:00 Singapore time, and `deploy/setup_server.sh` installs and enables both units. By hand:
+
+```
+.venv-perch\Scripts\python.exe -X utf8 scripts\weekly_train.py --no-swap
+```
+
+**Which recordings the learners fit on** (`scripts/review_sources.py`, since 2026-11-23):
+
+- Survey recordings: every recording in the long-form caches, plus every wav under `dataset/`.
+- Uploads (`data/uploads`, from `scan_audio.py`): an upload counts once its scan is complete, meaning
+  the scan version and the audio's sha256 match.
+- Left out: deleted uploads, uploads not yet scanned, and uploads whose name a survey recording already
+  has. That name is ambiguous, so its rows are dropped too.
+- Added rows carry split `""`.
+
+Every learner (`review_taxon.py`, `review_species.py`, `box_refine.py`, `review_calibrate.py`)
+takes `--uploads-dir`.
+
+**Without survey audio** (a machine with no `dataset/`; the server has had all 134 survey wavs since
+2026-11-23, so there this is a fallback):
+
+- The taxon head and learner 1 read the window caches only.
+- Learned species names embed each box with Perch. A box with no audio here is taken from
+  `data/review/embeddings/` (`review_species.embeddable`).
+- The box refiner reads the STFT. A box with no audio here is taken from the new
+  `data/review/refine_cache/` (`box_refine.BoxCache`, `--cache`): the refined boxes of each coarse
+  box at every grid setting. Those depend on the audio and the coarse box only.
+- A box with neither audio nor a cache entry is left out. The learner prints the count, and the
+  weekly report carries it.
+- **Limitation:** where the survey audio is missing, new survey boxes are not in either cache.
+  Species and refiner leave them out until the caches are rebuilt where the audio is and copied
+  over. Uploads are unaffected, since their audio sits beside the scan.
+
+**Steps of one run:**
+
+1. **Lock.** `data/review/weekly/.lock`. A lock older than 24 h, or one whose process is gone, is
+   stale and removed; otherwise the run exits 2.
+2. **Snapshot.** The four logs are copied into `weekly/<UTC stamp>/logs/`. The copy cuts a
+   half-written last line and drops rows whose field count differs from the header's, so the app can
+   keep logging during the run.
+3. **Fit.** Each learner runs in turn into `weekly/<stamp>/run/`, with its log beside it. Time and
+   peak memory are recorded.
+4. **Swap.** Each learner's new spec is compared with the live spec (the rule below):
+   - When it passes, the live files go to `calibration_history/<stamp>/<learner>/` and the new ones
+     replace them, each through a temporary file and `os.replace`, with the JSON last.
+   - A learner that failed keeps its live files.
+   - `review_calibrate.py` is report only, since the app does not read it.
+5. **Restart flag.** When anything was swapped, the run writes `weekly/restart-app`. The unit's
+   `ExecStopPost` removes the flag and restarts `callfinder`, because the app reads the learners only
+   at start.
+6. **Report.** `weekly/<stamp>/report.txt` and `report.json`. The last 12 runs and the last 12
+   history folders are kept. Exit 0 when every learner ran, 1 when one failed.
+
+**Swap rule.** A unit is a taxon group, the species learner, or a refiner group. A refit is swapped
+in only when:
+
+- every unit adopted live is still adopted;
+- the support of each of those units is at least the live support:
+  - taxon: positives and recordings;
+  - species: named rows and recordings;
+  - refiner: boxes and recordings;
+- every unit adopted in the new fit has a held-out CI low end above 0. The refiner reports no CI,
+  so it keeps its own adoption rule.
+
+Identical counts and decisions mean "nothing new" (no swap). A missing live file means swap.
+Otherwise the run keeps the live files and writes the reasons into the report.
+
+**Memory and time** (one run each on the real logs, 6,919 log rows; peak = the learner's process
+tree):
+
+| Learner | Laptop (survey audio) | Server mode (no survey audio, caches filled) |
+|---|---|---|
+| taxon | 1,431 s | 1,273 s, 1,139 MB |
+| species | 862 s (Perch loaded to embed the 6 upload boxes) | 649 s, 286 MB (no Perch: every box cached) |
+| refiner | 288 s | 104 s, 240 MB |
+| calibrate | 41 s | 42 s, 320 MB |
+
+The laptop run's peaks read 4.4 MB. That run measured the Windows venv launcher, not the
+interpreter, so the measurement now polls the whole process tree.
+
+The server has 3.8 GB, and the app holds about 1.4 GB. The unit runs the fit behind it:
+
+- `Nice=10`, `CPUWeight=20` and idle IO priority;
+- `MemoryHigh=1500M`, `MemoryMax=2G`: a fit that reaches the limit is killed, its live files are
+  kept, and the next week retries;
+- `OOMScoreAdjust=500`, so the kernel picks the fit over the app.
+
+### Tests
+
+**Labels with uploads** (`t_labels_sources.py`):
+
+| Check | Result |
+|---|---|
+| Survey recordings | the recordings with audio are inside the cache recordings plus the wavs |
+| No uploads | all five label kinds row for row identical to the old filter |
+| With uploads | survey rows of all five kinds unchanged; uploads only add rows |
+| Split | added rows carry split `""` |
+| Total | 12 checks, all pass |
+
+**Pieces** (`t_weekly_unit.py`):
+
+| Check | Result |
+|---|---|
+| Lock | first acquire; second refused; older than 24 h taken as stale; release removes it; a fresh lock whose process is gone taken as stale; a lock with no readable pid respected |
+| Snapshot | a quoted newline kept, a short row and a partial tail dropped (`rows 2, dropped 1, partial_bytes 4`); the real log round-trips row for row |
+| Swap rule, all three learners | identical fit → same; no live file → swap |
+| Taxon | more Aves positives → swap; one fewer → keep; Amphibia no longer adopted → keep; Weather adopted at CI low −0.033 → keep, at +0.01 → swap and named as newly adopted; only a non-adopted group changed → swap |
+| Species | more rows → swap; fewer recordings → keep; no longer adopted → keep |
+| Refiner | more Aves boxes → swap; fewer Anthropogenic recordings → keep; fewer boxes in a non-adopted group → swap |
+| `swap_in` | new files live, old ones in history, other files untouched, no temporary file left; a missing new file moves nothing |
+| `prune` | the oldest stamped runs go; other folders stay |
+| Total | 30 checks, all pass |
+
+**End to end with fake learners** (`t_weekly_main.py`: a scratch review dir, and stand-in learner
+scripts that write a prepared spec):
+
+| Check | Result |
+|---|---|
+| Exit code | 1 when a learner fails |
+| Snapshot | the half-written row (10 bytes) cut; the learner saw the snapshot's row count |
+| Taxon (+50 Aves positives) | swapped; the old files in `calibration_history` |
+| Species (same counts) | not swapped; its left-out line in the report |
+| Refiner (Anthropogenic dropped) | live kept, with the reason |
+| Calibrate (exit 3) | recorded as failed; nothing swapped for it |
+| Restart flag, lock | flag written (`swapped = [taxon]`); lock released |
+| Memory | a peak above 1 MB for every learner |
+| `--no-swap` | exit 0, "would swap"; live files and flag untouched |
+| Held lock | exit 2; no new run folder |
+| Total | 12 checks, all pass |
+
+**Real logs, scratch review dir** (2026-11-23, laptop, swap on; the live `data\review\calibration\`
+was not touched):
+
+- **Taxon: swapped.** Positives rose in every adopted group (Aves 13,706 → 13,807, recordings
+  99 → 103), and every CI low end stayed above 0.
+- **Species: swapped.** Named rows 3,174 → 3,180 and recordings 117 → 119, CI [+0.503, +0.633].
+- **Refiner: live kept.** With 907 boxes (live 833), Anthropogenic is no longer adopted (IoU
+  0.156 → 0.232, CI [−0.015, +0.121]). Aves and `all` still adopt.
+- **Calibrate:** report only.
+
+**Server mode** (2026-11-24, `pv.wav_paths` patched to return nothing, so the run has no survey
+audio; `--no-swap`, same logs):
+
+- Results: taxon and species "nothing new", refiner kept for the same reason.
+- `t_server_equal.py` compared the outputs with the laptop run: every npz, npy and csv identical
+  (15 checks pass).
+- The three JSON specs differ only in the version timestamp, the log path and NaN fields (NaN ≠ NaN).
+- So with the caches filled, the server fits the current labels exactly as the laptop does.
+
+The embeddings cache was rebuilt with the 6 upload boxes (3,178 rows: the 3,172 live vectors
+unchanged plus 6; old copy in `data\review\backup\embeddings-20261124\`). The refine cache was built
+new (906 coarse boxes, 7.8 MB).
+
 ## Common names for the top 5
 
 `scripts/build_common_names.py` writes `config/common_names.csv`: one English common name per
@@ -2955,10 +3222,12 @@ scripts/              Perch / EarthChirp zero-shot pipeline (this page)
     box_embed.py             box-pooled Perch embeddings (spatial cells under a box), CPU, cached
     review_taxon.py          learner 2: per-group taxon head on Perch window embeddings
     review_species.py        learner 3: learned species names from prototypes of named boxes
+    review_sources.py        the recordings the learners fit on: survey caches + scanned uploads
+    weekly_train.py          weekly refit of the learners, swapped in only when the swap rule holds
     build_common_names.py    English common names (eBird + GBIF) -> config/common_names.csv
 config/               Perch class index, taxonomy, target list, common names
 jobs/                 SLURM job for GPU extraction
-deploy/               website: Caddyfile (HTTPS + reviewer login), a systemd unit, setup_server.sh
+deploy/               website: Caddyfile (HTTPS + reviewer login), systemd units (app, weekly training), setup_server.sh
 notebooks/            perch_zeroshot_viewer.ipynb (the viewer)
 docs/figures/         README figures
 data/                 manifest.csv, splits.csv, zeroshot_report.csv (caches are git-ignored)

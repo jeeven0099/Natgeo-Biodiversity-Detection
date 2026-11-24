@@ -14,10 +14,14 @@ Segments are the rolling max over 2 windows (zeroshot_windows.segments). Nothing
 
 Added audio lives in data/uploads (--uploads-dir): audio/<rec>.<ext> + audio/<rec>.json (original name,
 sha256, format) and scans/<rec>.npz (the arrays above, SCAN_VERSION). The review app lists each such
-recording beside the dataset's; review_labels.py leaves their log rows out of every learner.
+recording beside the dataset's; the learners fit on their log rows too once the scan is complete
+(review_sources.py), except for deleted recordings (deleted.csv). Website guests' uploads go to
+uploads/guests/<folder>/ (the review app's own Uploads there, kept only while the guest's page is open):
+never in audio/, so nothing here or in the learners reads them.
 
     .venv-perch\\Scripts\\python.exe -X utf8 scripts\\scan_audio.py --check 3              # rebuild check
     .venv-perch\\Scripts\\python.exe -X utf8 scripts\\scan_audio.py my_recording.wav       # add a file
+    .venv-perch\\Scripts\\python.exe -X utf8 scripts\\scan_audio.py --delete REC --reason "..."   # app stopped
 
 --check N rescans N dataset recordings (evenly spread over window_scores.csv) and compares every output
 with the caches; it writes nothing. Limits: group probabilities <= 0.01, EarthChirp <= 1e-3, cell lanes
@@ -33,6 +37,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import uuid
@@ -236,6 +241,18 @@ class RowStack:
         self._p = (parts + (a,), offs + (n,), n + len(a))
         return n
 
+    def release(self, first: int, n: int) -> bool:
+        """Frees the rows one append() added (first, n: what it returned and its length): they read as
+        zeros from then on (a broadcast view, no memory), and every other row keeps its index. The base
+        array is never released. -> False when no appended part starts at first with n rows."""
+        parts, offs, total = self._p
+        j = bisect.bisect_left(offs, first)
+        if j == 0 or j >= len(offs) or offs[j] != first or len(parts[j]) != n:
+            return False
+        stub = np.broadcast_to(np.zeros((1, *self.row_shape), self.dtype), (n, *self.row_shape))
+        self._p = (parts[:j] + (stub,) + parts[j + 1:], offs, total)
+        return True
+
     def __getitem__(self, idx):
         parts, offs, n = self._p
         if isinstance(idx, slice):
@@ -308,12 +325,13 @@ class Uploads:
 
     def receive(self, read, length: int, filename: str, taken: set[str],
                 limit: int | None = MAX_UPLOAD_BYTES, max_duration_s: float | None = None,
-                extra: dict | None = None, too_big: str = "add longer files with scan_audio.py"
-                ) -> tuple[str, dict, bool]:
+                extra: dict | None = None, too_big: str = "add longer files with scan_audio.py",
+                rec_id: str | None = None) -> tuple[str, dict, bool]:
         """Streams `length` bytes from read(n) into audio/; -> (rec, info, created). The same bytes
         added before -> that recording (created False). Names in `taken` (lower case) get -2, -3, ...
         limit None: no size cap (the command line). max_duration_s: longer audio is refused and not
-        kept. extra: more fields for the new recording's audio/<rec>.json (the website's private key)."""
+        kept. extra: more fields for the new recording's audio/<rec>.json (the website's private key).
+        rec_id: the new recording's id instead of one made from the file name (a guest's random id)."""
         if length <= 0:
             raise ValueError("the upload is empty")
         if limit is not None and length > limit:
@@ -353,7 +371,7 @@ class Uploads:
             if max_duration_s is not None and si.duration > max_duration_s + 1e-6:
                 raise ValueError(f"{filename!r} is {si.duration / 60:.2f} min long; the limit is "
                                  f"{max_duration_s / 60:g} min: cut it into parts")
-            base = clean_name(filename)
+            base = clean_name(rec_id or filename)
             rec, k = base, 1
             gone = {r.lower() for r in self.deleted()}     # a deleted id is never reused: its log rows stay
             while rec.lower() in taken or rec.lower() in self.names() or rec.lower() in gone:
@@ -401,10 +419,11 @@ class Uploads:
                 left.append(p.name)
         return gone, left
 
-    def delete(self, rec: str, reason: str = "") -> tuple[list[str], list[str]]:
+    def delete(self, rec: str, reason: str = "", log: bool = True) -> tuple[list[str], list[str]]:
         """Removes a recording's sidecar (first, so a half-deleted recording is never listed), audio and
         scan; appends rec, sha256 and the time to deleted.csv, which the learners read to leave the
-        recording's answers out. -> (file names removed, file names left open: see purge)."""
+        recording's answers out (log False: no row, for a guest's upload, which no learner reads).
+        -> (file names removed, file names left open: see purge)."""
         side = self.audio / f"{rec}.json"
         info = json.loads(side.read_text(encoding="utf-8")) if side.exists() else {}
         gone = []
@@ -413,9 +432,11 @@ class Uploads:
             gone.append(side.name)
         more, left = self.purge(rec, info)
         gone += more
-        log = self.root / DELETED_FILE
-        new = not log.exists()
-        with open(log, "a", encoding="utf-8", newline="") as f:
+        if not log:
+            return gone, left
+        p = self.root / DELETED_FILE
+        new = not p.exists()
+        with open(p, "a", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             if new:
                 w.writerow(DELETED_COLS)
@@ -429,6 +450,12 @@ class Uploads:
             return set()
         with open(p, encoding="utf-8", newline="") as f:
             return {r["recording"] for r in csv.DictReader(f)}
+
+    def remove_all(self) -> bool:
+        """Removes the whole folder (a guest's: nothing in it is kept, nothing goes to deleted.csv)
+        -> True when it is gone (a file still open elsewhere is left for a later call)."""
+        shutil.rmtree(self.root, ignore_errors=True)
+        return not self.root.exists()
 
 
 def dataset_names() -> set[str]:
@@ -555,6 +582,23 @@ def add_files(args) -> int:
     return 0
 
 
+def delete_files(args) -> int:
+    """--delete: removes added recordings as the website's delete does (Uploads.delete: files gone, a
+    deleted.csv row, so the learners leave out their answers). Stop the review app first: it holds the
+    recordings in memory and would keep serving them until its next start."""
+    up = Uploads(args.uploads_dir)
+    have = up.recordings()
+    bad = [r for r in args.delete if r not in have]
+    if bad:
+        print("not in " + str(up.audio) + ": " + ", ".join(bad) + " (nothing deleted)")
+        return 1
+    for rec in args.delete:
+        gone, left = up.delete(rec, args.reason)
+        print(f"{rec}: removed {', '.join(gone)}" + (f"; still open, not removed: {', '.join(left)}" if left else "")
+              + f"; logged in {up.root / DELETED_FILE}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="*", help="audio files to add to --uploads-dir and scan")
@@ -564,7 +608,14 @@ def main() -> int:
     ap.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     ap.add_argument("--uploads-dir", type=Path, default=UPLOADS_DIR)
     ap.add_argument("--review-dir", type=Path, default=REVIEW_DIR, help="whose logged names a new file avoids")
+    ap.add_argument("--delete", nargs="+", metavar="REC",
+                    help="delete these added recordings (stop the review app first); needs --reason")
+    ap.add_argument("--reason", default="", help="with --delete: the reason written to deleted.csv")
     args = ap.parse_args()
+    if args.delete:
+        if args.files or args.check or args.recs or not args.reason.strip():
+            ap.error("--delete takes recording ids and --reason, nothing else")
+        return delete_files(args)
     if args.check or args.recs:
         args.check = args.check or len(args.recs)
         return check(args)
