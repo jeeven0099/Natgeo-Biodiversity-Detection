@@ -1372,6 +1372,27 @@ Checks behind the diagnosis (nothing written):
 The test now starts Chrome with `--remote-debugging-port=0` and an absolute profile path, and reads
 the port from `DevToolsActivePort`. On 2026-11-22 a fixed port (9334) never came up on this laptop.
 
+**Group names (2026-11-24).** The reviewer page now shows Aves as **Birds** and EC-Insecta as
+**Insects**. Only the display changed: the log, the server, the learners, the tick values and the
+buttons' `data-lane` keep the group ids (Aves, EC-Insecta). `LANE_NAMES` / `laneName` in
+`review_app.html` map the names, and `groupsName` maps the lists of an audit window ("Aves; Insecta" →
+"Birds, Insecta"). They are used in the group ticks and audit ticks, the list rows, the group
+buttons and their note, the question, the title (e.g. "Insects → Birds"), the audit lines, the
+"logged …" messages and the "yours:" label on the spectrogram. The other groups keep their ids.
+
+| Test (`ui_reviewpage.mjs` v2, scratch copies, port 8831; v1 is `old/ui_reviewpage_v1.mjs`) | Result |
+|---|---|
+| Group ticks | read Birds, Amphibia, Mammalia, Anthropogenic, Insects; values Aves … EC-Insecta |
+| Audit group ticks | Birds, Amphibia, Insecta, Mammalia, Anthropogenic, Weather |
+| List rows (minute 1) | the Aves boxes read Birds, the EC-Insecta box Insects |
+| Group buttons | Birds … Insects; `data-lane` keeps the ids |
+| EC-Insecta model box (720–742.5 s) changed to Aves | title "Insects → Birds #118", question "Is there a sound of Birds in the box?", note "The model said Insects …" |
+| Changed to Amphibia, Accept | message "(the Insects box: no) and new box … (Amphibia, yes)"; the log rows read Amphibia / reviewer / yes, then EC-Insecta / EarthChirp / no |
+| Earlier checks (removed controls, taxon head boxes, group change, new box, JS errors) | unchanged, pass |
+| Total | 29 checks, all pass |
+
+A screenshot of the changed box shows the same names in the ticks, list, title and buttons.
+
 ## Audio editor: open, record, cut and save audio
 
 `scripts/review_editor.html`, served by the review app at http://127.0.0.1:8765/editor (the
@@ -1877,6 +1898,17 @@ all pass:
 records its calls in `sessionStorage`; the reload check reads "api/leave text/plain;" from there.
 The server side of the beacon shows in the folder being removed 33–44 s after leaving, which is the
 30 s grace plus the 15 s reaper step.
+
+**Group name change (2026-11-24).** On the public page EC-Insecta now reads **Insects** (it was
+"Insects (EarthChirp)"); Aves already read Birds. The other names are unchanged, so "Insects (Perch)"
+and "Insects (EarthChirp margin)" still sit beside it. `ui_public.mjs` v3 (v2 is
+`old/ui_public_v2.mjs`) adds one check: the group labels include "Insects" and none reads "Aves",
+"EC-Insecta" or "Insects (EarthChirp)". It also now starts Chrome on port 0 and reads
+`DevToolsActivePort`; the fixed port 9340 did not come up that day. Run on scratch copies (port
+8812): 45 checks pass, the new one included. The run then stopped at the wait for three uploads to
+finish scanning: the page's fetches failed ("Failed to fetch") while Cisco's `csc_ui.exe` held
+13,057 bound sockets on this laptop. The checks after that point (delete, leaving, layout) were not
+run.
 
 **Public editor test** (`ui_editor_public.mjs`, headless Chrome, `/editor` on the public server),
 8 checks, all pass. The note and the button title use the guest wording ("Only you can see it; it

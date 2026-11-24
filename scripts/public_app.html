@@ -160,7 +160,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const mmss = (s, d = 1) => { s = Math.round(s * 10 ** d) / 10 ** d; const m = Math.floor(s / 60), r = s - 60 * m; return `${m}:${r.toFixed(d).padStart(d ? d + 3 : 2, "0")}`; };
 const absLink = l => new URL(l, location.href).href;
 const LANE_NAMES = {Aves: "Birds", Amphibia: "Frogs and toads", Insecta: "Insects (Perch)", Mammalia: "Mammals",
-  Anthropogenic: "Human-made sound", Weather: "Weather (rain, wind)", "EC-Insecta": "Insects (EarthChirp)",
+  Anthropogenic: "Human-made sound", Weather: "Weather (rain, wind)", "EC-Insecta": "Insects",
   "EC-margin": "Insects (EarthChirp margin)"};
 const laneName = l => LANE_NAMES[l] || l;
 

@@ -234,6 +234,10 @@ const api = async (path, opts) => {
 };
 const fmt = (x, n = 2) => Number(x).toFixed(n);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+// names shown for a group; the log, the server and the learners keep the group ids (Aves, EC-Insecta)
+const LANE_NAMES = {Aves: "Birds", "EC-Insecta": "Insects"};
+const laneName = g => LANE_NAMES[g] || g;
+const groupsName = s => String(s).split("; ").map(laneName).join(", ");     // "Aves; Insecta" (audit windows)
 const store = {get(k, d) { try { return localStorage.getItem(k) ?? d; } catch { return d; } },
                set(k, v) { try { localStorage.setItem(k, v); } catch {} }};
 
@@ -263,9 +267,9 @@ async function init() {
   on = Array.isArray(on) ? on.filter(g => META.lanes.includes(g)) : [];
   if (!on.length) on = META.default_on;
   $("lanes").innerHTML = META.lanes.map(g =>
-    `<label><input type="checkbox" value="${g}" ${on.includes(g) ? "checked" : ""}><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${g} <span class="small">≥${META.thresholds[g]}</span></label>`).join("");
+    `<label><input type="checkbox" value="${g}" ${on.includes(g) ? "checked" : ""}><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${esc(laneName(g))} <span class="small">≥${META.thresholds[g]}</span></label>`).join("");
   $("auditgroups").innerHTML = META.audit_groups.map(g =>
-    `<label><input type="checkbox" value="${g}" checked><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${g}</label>`).join("");
+    `<label><input type="checkbox" value="${g}" checked><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${esc(laneName(g))}</label>`).join("");
   fillRecs();
   $("addWrap").hidden = !META.can_add;
   // ?rec= (the editor's link to a file it added) opens that recording once, then leaves the address
@@ -448,13 +452,13 @@ function renderList() {
   $("list").innerHTML = head + BOXES.map((b, i) => {
     const st = b.source === "audit" ? ({complete: "yes", skipped: "unknown"}[b.status] || "") : b.decision;
     const sym = b.source === "audit" ? ({complete: "✓", skipped: "–"}[b.status] || "·") : mark[b.decision] || "·";
-    const name = b.source === "audit" ? "audit window" : b.lane || `<i>group?</i>`;
+    const name = b.source === "audit" ? "audit window" : b.lane ? esc(laneName(b.lane)) : `<i>group?</i>`;
     return `<div class="row${i === cur ? " cur" : ""}" data-i="${i}">
        <span class="st ${st}">${sym}</span>
        <span>${b.source === "audit" ? "" : `<span class="sw" style="background:${META.colors[b.lane] || "#888"}"></span>`} ${name} ${tagOf(b)}
          <span class="small">#${b.n} ${fmt(b.begin_s, 1)}–${fmt(b.end_s, 1)} s</span>
          ${b.species ? `<br><span class="small">${esc(b.species)}</span>` : ""}
-         ${b.source === "audit" && b.groups ? `<br><span class="small">complete for ${esc(b.groups)}</span>` : ""}</span>
+         ${b.source === "audit" && b.groups ? `<br><span class="small">complete for ${esc(groupsName(b.groups))}</span>` : ""}</span>
        <span class="small">${b.max_score == null ? "" : fmt(b.max_score, 3)}</span></div>`;
   }).join("");
   const el = $("list").querySelector(".cur");
@@ -483,11 +487,11 @@ function renderLanes() {
   const now = laneNow(), model = needsLane() ? "" : BOX.lane;
   $("lanebtns").innerHTML = META.lanes.map(g =>
     `<button data-lane="${esc(g)}" class="${g === now ? "on" : ""}${CHG && g === model ? " model" : ""}"
-       title="${g === model ? "the model's group" : "the call is " + esc(g)}"><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${esc(g)}</button>`).join("");
+       title="${g === model ? "the model's group" : "the call is " + esc(laneName(g))}"><span class="sw" style="background:${META.colors[g] || "#888"}"></span>${esc(laneName(g))}</button>`).join("");
   $("lanenote").innerHTML = BOX.new ? (BOX.lane ? "" : "Pick the group of the call you box.")
-    : CHG ? `The model said <b>${esc(model)}</b>. Accept logs its box as <b>No</b> and this box as a new <b>${esc(CHG)}</b> box with your answer below; click ${esc(model)} to undo.`
+    : CHG ? `The model said <b>${esc(laneName(model))}</b>. Accept logs its box as <b>No</b> and this box as a new <b>${esc(laneName(CHG))}</b> box with your answer below; click ${esc(laneName(model))} to undo.`
     : needsLane() ? "" : "The model's group. If the call is of another group, click that group.";
-  $("question").textContent = now ? `Is there a sound of ${now} in the box?` : "Is there a sound of this box's group in the box?";
+  $("question").textContent = now ? `Is there a sound of ${laneName(now)} in the box?` : "Is there a sound of this box's group in the box?";
 }
 $("lanebtns").addEventListener("click", e => {
   const b = e.target.closest("button[data-lane]");
@@ -506,7 +510,7 @@ $("lanebtns").addEventListener("click", e => {
 });
 function setTitle() {
   if (BOX.new) { $("title").textContent = `New box · ${BOX.recording}`; return; }
-  $("title").textContent = `${CHG ? `${BOX.lane} → ${CHG}` : BOX.lane || "group?"} #${BOX.n} · ${BOX.recording}`;
+  $("title").textContent = `${CHG ? `${laneName(BOX.lane)} → ${laneName(CHG)}` : BOX.lane ? laneName(BOX.lane) : "group?"} #${BOX.n} · ${BOX.recording}`;
 }
 
 // ---------------- one box ----------------
@@ -564,7 +568,7 @@ function showAudit() {
   $("auditgroups").querySelectorAll("input").forEach(x => { x.checked = done.includes(x.value); });
   $("auditcomment").value = L ? L.comment || "" : "";
   $("audithist").innerHTML = BOX.history.length ? BOX.history.map(h =>
-    `<div>${esc(h.logged_at)} · ${esc(h.reviewer || "–")} · <b>${esc(h.status)}</b>${h.groups ? " for " + esc(h.groups) : ""} · ${esc(h.n_reviewer_boxes)} boxes${h.comment ? " · " + esc(h.comment) : ""}</div>`).join("")
+    `<div>${esc(h.logged_at)} · ${esc(h.reviewer || "–")} · <b>${esc(h.status)}</b>${h.groups ? " for " + esc(groupsName(h.groups)) : ""} · ${esc(h.n_reviewer_boxes)} boxes${h.comment ? " · " + esc(h.comment) : ""}</div>`).join("")
     : "not closed yet";
   $("auditmsg").textContent = L ? `already ${L.status}; pressing again adds a new row` : "";
   renderAuditBoxes(); minNav();
@@ -575,7 +579,7 @@ function renderAuditBoxes() {
   const [a, b] = [BOX.begin_s, BOX.end_s];
   const mine = ALL.filter(x => x.source === "reviewer" && x.acc && x.acc[0] < b && x.acc[1] > a);
   $("auditboxes").innerHTML = mine.length ? mine.map(x =>
-    `<div><span class="sw" style="background:${META.colors[x.lane] || "#888"}"></span> ${esc(x.lane)} · ${fmt(x.acc[0])}–${fmt(x.acc[1])} s, ${fmt(x.acc[2])}–${fmt(x.acc[3])} kHz · <b>${esc(x.decision)}</b>${x.species ? " · " + esc(x.species) : ""}</div>`).join("")
+    `<div><span class="sw" style="background:${META.colors[x.lane] || "#888"}"></span> ${esc(laneName(x.lane))} · ${fmt(x.acc[0])}–${fmt(x.acc[1])} s, ${fmt(x.acc[2])}–${fmt(x.acc[3])} kHz · <b>${esc(x.decision)}</b>${x.species ? " · " + esc(x.species) : ""}</div>`).join("")
     : "none yet";
 }
 async function closeAudit(status) {
@@ -589,7 +593,7 @@ async function closeAudit(status) {
     META.n_audit_complete += (row.status === "complete") - (it.status === "complete");
     it.status = row.status; it.groups = row.groups;
     logStat(); renderList();
-    $("auditmsg").textContent = `window ${row.status}${row.groups ? " for " + row.groups : ""} (${row.n_reviewer_boxes} of your boxes in it)`;
+    $("auditmsg").textContent = `window ${row.status}${row.groups ? " for " + groupsName(row.groups) : ""} (${row.n_reviewer_boxes} of your boxes in it)`;
     if ($("auditAdvance").checked) nextUnreviewed();
   } catch (e) { $("auditmsg").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
@@ -864,13 +868,13 @@ async function accept() {
     META.n_logged += CHG ? 2 : 1; logStat();
     tickLane(row.lane);                // a box just logged in an unticked group would leave the list
     const r = META.recordings.find(r => r.id === BOX.recording);
-    const said = `logged ${row.log_id} (${row.lane}, ${row.decision}${row.species ? ", " + row.species : ""})`;
+    const said = `logged ${row.log_id} (${laneName(row.lane)}, ${row.decision}${row.species ? ", " + row.species : ""})`;
     if (CHG) {                         // the model box is now a No, and the call a new box of the picked group
       const it = BOXES[cur], open = !it.decision, from = BOX.lane;
       r.reviewed += 1 + open; fillRecs();
       CHG = "";
       await loadRec(it.id, MIN);
-      $("msg").textContent = `logged ${row.model_row.log_id} (the ${from} box: no) and new box ${row.log_id} (${row.lane}, ${row.decision}${row.species ? ", " + row.species : ""})`;
+      $("msg").textContent = `logged ${row.model_row.log_id} (the ${laneName(from)} box: no) and new box ${row.log_id} (${laneName(row.lane)}, ${row.decision}${row.species ? ", " + row.species : ""})`;
       if ($("advance").checked) nextUnreviewed();
       return;
     }
@@ -961,7 +965,7 @@ function draw() {
     ctx.strokeStyle = "rgba(0,150,60,.95)"; ctx.lineWidth = 1.5; ctx.setLineDash([1, 3]);
     ctx.strokeRect(tx(g, a), fy(g, hi), tx(g, e) - tx(g, a), fy(g, lo) - fy(g, hi));
     ctx.setLineDash([]); ctx.fillStyle = "rgba(0,120,50,.95)";
-    ctx.fillText(`yours: ${b.lane}`, tx(g, a) + 2, Math.min(g.y1 - 2, fy(g, lo) - 3));
+    ctx.fillText(`yours: ${laneName(b.lane)}`, tx(g, a) + 2, Math.min(g.y1 - 2, fy(g, lo) - 3));
   });
   if (BOX && !BOX.new && !isAudit()) {
     // kept cells
