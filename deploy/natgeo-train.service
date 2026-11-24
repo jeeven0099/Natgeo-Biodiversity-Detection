@@ -16,7 +16,8 @@ WorkingDirectory=/srv/natgeo
 ExecStart=/srv/natgeo/.venv-perch/bin/python -X utf8 scripts/weekly_train.py
 ExecStopPost=+/bin/sh -c 'if [ -e /srv/natgeo/data/review/weekly/restart-app ]; then rm -f /srv/natgeo/data/review/weekly/restart-app; systemctl restart callfinder; fi'
 # Behind the app: lower CPU and disk priority, and a memory ceiling so a fit cannot push the app out.
-# Measured peaks (2026-11-24): taxon 1139 MB, calibrate 320, species 286 (every box cached), refiner 240;
+# Measured peaks (2026-11-24): laptop server mode taxon 1139 MB, calibrate 320, species 286 (every box
+# cached), refiner 240; server dry run taxon 1425, species 1278, calibrate 381, refiner 317;
 # the app ~1.4 GB of 3.8 GB. Above MemoryHigh the fit is slowed into swap; at MemoryMax it is killed
 # (live files kept, the next run retries). OOMScoreAdjust: if memory still runs out, the kernel picks
 # the fit, not the app.

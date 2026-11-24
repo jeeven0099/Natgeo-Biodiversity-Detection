@@ -3077,6 +3077,24 @@ The embeddings cache was rebuilt with the 6 upload boxes (3,178 rows: the 3,172 
 unchanged plus 6; old copy in `data\review\backup\embeddings-20261124\`). The refine cache was built
 new (906 coarse boxes, 7.8 MB).
 
+**On the server** (2026-11-24, stamp 20261124-221252 UTC, `--no-swap`, run by hand with
+`systemd-run -p MemoryMax=2G -p Nice=10`, beside the running app; survey audio in `dataset/`):
+
+| Step | rc | Time | Peak (wait4 max RSS) | Result |
+|---|---|---|---|---|
+| Snapshot | | | | annotation_log 6,926 rows, box_shown 7,011, species_shown 222; 0 dropped, 0 partial bytes; no audit windows |
+| taxon | 0 | 1,290 s | 1,425 MB | would swap: Aves, Amphibia, Insecta, Anthropogenic adopted, support kept or grown |
+| species | 0 | 294 s | 1,278 MB | would swap: adopted, support kept or grown |
+| refiner | 0 | 94 s | 317 MB | live kept: Anthropogenic adopts live, not in the new fit (new adopts Aves and `all`) |
+| calibrate | 0 | 22 s | 381 MB | report only |
+
+The whole run took 28 min 20 s. Nothing was swapped, no restart flag was written, and nothing was
+pruned. On the server the peaks are higher than on the laptop in server mode (taxon 1,139 MB,
+species 286 MB). The species log shows whether Perch was loaded for uncached boxes; that was not
+checked here. The taxon peak sits 75 MB under the timer unit's `MemoryHigh=1500M`; above it the fit
+is slowed, not stopped. systemd's own "Memory peak: 256.0K" for the transient unit does not match
+these figures and is not used.
+
 ## Common names for the top 5
 
 `scripts/build_common_names.py` writes `config/common_names.csv`: one English common name per
