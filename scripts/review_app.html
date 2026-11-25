@@ -908,9 +908,11 @@ function nextUnreviewed() {
 // ---------------- drawing ----------------
 const cv = $("spec"), ctx = cv.getContext("2d");
 const PADL = 42, PADB = 22;
-function geom() {
+// fit (draw() only): make the bitmap match the canvas's size on the page. Resizing wipes the canvas, and the
+// mouse handlers do not repaint it, so they must not resize it
+function geom(fit = false) {
   const W = cv.clientWidth, H = cv.clientHeight, dpr = window.devicePixelRatio || 1;
-  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  if (fit && (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr))) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const fv = +$("fview").value;
   return {W, H, x0: PADL, x1: W - 6, y0: 6, y1: H - PADB, fv};
@@ -921,7 +923,7 @@ const xt = (g, x) => view[0] + (x - g.x0) / (g.x1 - g.x0) * (view[1] - view[0]);
 const yf = (g, y) => (g.y1 - y) / (g.y1 - g.y0) * g.fv;
 function draw() {
   if (!BOX && !minuteMode()) return;
-  const g = geom();
+  const g = geom(true);
   ctx.fillStyle = "#000"; ctx.fillRect(0, 0, g.W, g.H);
   ctx.fillStyle = quietCss; ctx.fillRect(g.x0, g.y0, g.x1 - g.x0, g.y1 - g.y0);
   if (img && imgView) {
@@ -1024,6 +1026,10 @@ function secs(t) { const m = Math.floor(t / 60), s = t - 60 * m; return `${m}:${
 function span1() { return view[1] - view[0] <= 12; }
 function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${a})`; }
 window.addEventListener("resize", draw);
+// the canvas also changes size with no window resize: the page's scroll bar comes and goes as the cards below
+// grow and shrink (the top 5 arriving), and it takes its width from the page. Redraw at the new size then
+// (not before the recordings are known: there is nothing to draw yet)
+new ResizeObserver(() => { if (META && META.recordings.length) draw(); }).observe(cv);
 ["fview", "showCells"].forEach(id => $(id).addEventListener("change", draw));
 
 // The box is set by drawing: drag anywhere on the spectrogram for a new box (also inside the
@@ -1179,9 +1185,9 @@ function readout(g, x, y) {
 // items listed (ticked groups, model and your boxes, every minute): filled = yes, outlined dashed = not logged
 // yet, grey = no; the minute grid (the open minute shaded); the view as a white frame
 const ov = $("overview"), octx = ov.getContext("2d");
-function ovGeom() {
+function ovGeom(fit = false) {     // fit: as geom(), only drawOverview() resizes the bitmap
   const W = ov.clientWidth, H = ov.clientHeight, dpr = window.devicePixelRatio || 1;
-  if (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr)) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
+  if (fit && (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr))) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
   octx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const d = BOX ? BOX.duration_s : recDur();
   return {W, H, x0: PADL, x1: W - 6, y0: 3, y1: H - 13, d, fv: +$("fview").value};
@@ -1191,7 +1197,7 @@ const ofy = (o, f) => o.y1 - Math.min(f, o.fv) / o.fv * (o.y1 - o.y0);
 const oxt = (o, x) => Math.max(0, Math.min(o.d, (x - o.x0) / (o.x1 - o.x0) * o.d));
 function drawOverview() {
   if (!META || !live()) return;
-  const o = ovGeom(), c = octx;
+  const o = ovGeom(true), c = octx;
   c.fillStyle = "#111"; c.fillRect(0, 0, o.W, o.H);
   c.fillStyle = "#1c1c1c"; c.fillRect(o.x0, o.y0, o.x1 - o.x0, o.y1 - o.y0);
   // minutes: grid, labels where they fit, the open minute shaded

@@ -471,9 +471,11 @@ $("zoomSel").onclick = () => { if (sel) { const a = sel.a / SR(), b = sel.b / SR
 
 // ---------------- drawing ----------------
 const cv = $("spec"), ctx = cv.getContext("2d"), PADL = 42, PADB = 22, EDGE = 6;
-function geom() {
+// fit (draw() only): make the bitmap match the canvas's size on the page. Resizing wipes the canvas, and the
+// mouse handlers do not repaint it, so they must not resize it
+function geom(fit = false) {
   const W = cv.clientWidth, H = cv.clientHeight, dpr = window.devicePixelRatio || 1;
-  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  if (fit && (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr))) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const fv = $("fview").value === "all" ? nyq() : Math.min(nyq(), +$("fview").value);
   return {W, H, x0: PADL, x1: W - 6, y0: 6, y1: H - PADB, fv};
@@ -483,7 +485,7 @@ const xt = (g, x) => view[0] + (x - g.x0) / (g.x1 - g.x0) * (view[1] - view[0]);
 const fy = (g, f) => g.y1 - f / g.fv * (g.y1 - g.y0);
 const yf = (g, y) => (g.y1 - y) / (g.y1 - g.y0) * g.fv;
 function draw() {
-  const g = geom();
+  const g = geom(true);
   ctx.fillStyle = "#000"; ctx.fillRect(0, 0, g.W, g.H);
   if (!doc) {
     ctx.fillStyle = "#aaa"; ctx.font = "14px system-ui";
@@ -522,6 +524,10 @@ function draw() {
   drawOverview();
 }
 window.addEventListener("resize", () => setView(view));
+// the canvas also changes size with no window resize: the page's scroll bar comes and goes as the page grows and
+// shrinks ("How it works" opening, a status line wrapping), and it takes its width from the page. Same as a resize
+// then; with no file open there is no view to keep, only the hint to redraw
+new ResizeObserver(() => { if (doc) setView(view); else draw(); }).observe(cv);
 
 // ---------------- overview: the whole file's waveform envelope ----------------
 const ov = $("overview"), octx = ov.getContext("2d");
@@ -538,16 +544,16 @@ function envelope(w) {
   }
   return env = {ver: doc.ver, w, lo, hi, peak};
 }
-function ovGeom() {
+function ovGeom(fit = false) {     // fit: as geom(), only drawOverview() resizes the bitmap
   const W = ov.clientWidth, H = ov.clientHeight, dpr = window.devicePixelRatio || 1;
-  if (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr)) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
+  if (fit && (ov.width !== Math.round(W * dpr) || ov.height !== Math.round(H * dpr))) { ov.width = Math.round(W * dpr); ov.height = Math.round(H * dpr); }
   octx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return {W, H, x0: PADL, x1: W - 6, y0: 3, y1: H - 3, d: dur()};
 }
 const otx = (o, t) => o.x0 + (o.d ? t / o.d : 0) * (o.x1 - o.x0);
 const oxt = (o, x) => Math.max(0, Math.min(o.d, (x - o.x0) / (o.x1 - o.x0) * o.d));
 function drawOverview() {
-  const o = ovGeom(), c = octx;
+  const o = ovGeom(true), c = octx;
   c.fillStyle = "#111"; c.fillRect(0, 0, o.W, o.H);
   if (!doc || !N()) return;
   const w = Math.max(1, Math.round(o.x1 - o.x0)), e = envelope(w), mid = (o.y0 + o.y1) / 2, half = (o.y1 - o.y0) / 2;
