@@ -1419,6 +1419,13 @@ panels, which are slightly see-through. It still brightens and fades over 9 s, s
 `prefers-reduced-motion` and takes no clicks. Each page fills the window and its panels scroll by
 themselves. In a narrow window the page scrolls as a whole, one part under the other, as before.
 
+**Tab icon (2026-11-25).** Each page shows the project's logo in its browser tab: the bird and the
+leaf, without the logo's background, with a thin light edge so that the dark bird also shows on a
+dark tab. It is a 64 px PNG written into the page's `<head>` as a data address (one
+`<link rel="icon">` line), so the server has no icon file to serve. The sign-in page keeps its own
+icon. The top bar holds the page's name alone: a small yellow mark that stood beside it on 24 and
+25 Nov is gone.
+
 **Reviewer page** (`review_app.html`, the first picture of this README): three panels.
 - **Top bar:** the recording list, add audio…, export Raven table and upload audio ↗ on the left; the
   reviewer name and sign out on the right.
@@ -1500,6 +1507,7 @@ The build, check and test scripts are kept with the site's hosting notes, not in
 | Audio editor, 25 Nov (`test_editor.mjs`) | 54 / 54 at 1512 × 850 and at 1280 × 720, 53 / 53 at 820 × 800: empty page, open a WAV, readout, select by drag, move an edge, click, Ctrl+C / X / V / Z / Y / A, Delete, Esc, every edit and view button, the strip, the wheel, the kHz limit, the display controls, Space, play at ½×, "How it works", the drop sign, save as 16-bit (the file's size checked), record (a tone made in the page stood in for the microphone), detect calls (the upload and the scan answered in the browser), the window resized twice, and the page as a visitor gets it |
 | Upload page, 25 Nov (`test_public.mjs`) | 40 / 40 at 1512 × 850 and at 1280 × 720, 39 / 39 at 900 × 800: first visit, upload refused without the tick, upload followed through the queue and the scan until the recording opens by itself, minute buttons, list and `[`, group ticks, colours and contrast, play minute and P, a box opened from the spectrogram and from the list, play call / original sound / a top-5 window, "this looks wrong" (offered on a linked upload only), copy link, open another upload, delete, and the window set to 1280 × 720, 1000 × 800 and 390 × 844 with a recording and a box open |
 | Every control reachable (editor and upload page) | in the main states (nothing open, a file or recording open, a box open) and at each window size, every shown button, list, field and link has a size and nothing covers its middle; nothing sticks out of the window sideways |
+| Tab icon (`test_icon.mjs`) | 17 / 17: on each of the three pages one icon line, a 64 × 64 PNG with a see-through ground; Chrome reports it as the tab's icon; no mark beside the page's name; the yellow frame around the window still there |
 | JS exceptions | none |
 
 Not tested: Safari, Firefox and touch screens; a real Accept, upload, delete or flag on the server
