@@ -5,73 +5,198 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Call Finder</title>
 <style>
+/* The look shared by the audio editor and the public upload page: the same colours, controls, top bar, panels and
+   yellow frame as the reviewer page (reviewer/style.css holds the same rules for that page). */
 :root {
-  --bg: #f6f6f3; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #dcdcd6;
-  --accent: #2458c6; --yes: #23863a; --no: #c0392b; --unk: #a07800; --sel: #e8eefb;
+  --bg: #f3f4f6; --panel: #ffffff; --ink: #171a1f; --muted: #5d6672; --line: #e0e3e8;
+  --accent: #2563eb; --yes: #157a39; --no: #c8342a; --unk: #8f6600; --sel: #e9f0fe;
+  --field: #ffffff; --raise: #f7f8fa; --on-accent: #ffffff;
+  --frame: 255, 204, 0; --frame-a: .16; --glass: rgba(255, 255, 255, .86);
+  --radius: 10px; --radius-s: 7px; --ctl: 30px; --shadow: 0 1px 2px rgba(16, 24, 40, .06);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #161615; --panel: #20201e; --ink: #ecece8; --muted: #9b9b94; --line: #3a3a36;
-    --accent: #7ea3f2; --yes: #4cc26a; --no: #ef6b5e; --unk: #e0b43c; --sel: #27324a;
+    --bg: #0d0f12; --panel: #16191d; --ink: #e8eaed; --muted: #96a0ab; --line: #272c33;
+    --accent: #6ea8ff; --yes: #3fba6a; --no: #f26d60; --unk: #e2b340; --sel: #1b2740;
+    --field: #1b1f24; --raise: #1b1f24; --on-accent: #0a1220; --shadow: none;
+    --frame-a: .26; --glass: rgba(22, 25, 29, .82);
   }
 }
-* { box-sizing: border-box; }
-body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
-header { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; padding: 10px 16px;
-  background: var(--panel); border-bottom: 1px solid var(--line); }
-header h1 { font-size: 17px; margin: 0; }
-header .sub { color: var(--muted); font-size: 13px; flex: 1; min-width: 200px; }
-header a { font-size: 13px; }
-a { color: var(--accent); }
-main { max-width: 1100px; margin: 0 auto; padding: 12px 16px 40px; display: grid; gap: 12px; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
-.card h2 { font-size: 15px; margin: 0 0 8px; }
-select, input, textarea, button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line); border-radius: 5px; }
-select, input { padding: 3px 6px; }
-textarea { padding: 5px 7px; width: 100%; resize: vertical; }
-button { padding: 5px 11px; cursor: pointer; }
-button:hover { border-color: var(--accent); }
-button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+* { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+html, body { height: 100%; }
+/* the page fills the window and never scrolls as a whole: each panel scrolls by itself */
+body { margin: 0; font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg); color: var(--ink); display: flex; flex-direction: column; overflow: hidden;
+  -webkit-font-smoothing: antialiased; }
+/* the yellow frame, glowing slowly, around the window: a thin line on top and a soft glow behind the panels,
+   which are slightly see-through. Neither takes clicks */
+body::before, body::after { content: ""; position: fixed; inset: 0; pointer-events: none; animation: frameGlow 9s ease-in-out infinite; }
+body::before { box-shadow: inset 0 0 13vh 1.6vh rgba(var(--frame), .6); opacity: var(--frame-a); z-index: -1; }
+body::after { border: 3px solid rgb(var(--frame)); opacity: calc(var(--frame-a) * 2.2); z-index: 30; animation-name: frameLine; }
+@keyframes frameLine { 50% { opacity: calc(var(--frame-a) * 3.4); } }
+@keyframes frameGlow { 50% { opacity: calc(var(--frame-a) * 1.6); } }
+
+/* ---------------- controls ---------------- */
+select, input, textarea, button { font: inherit; color: inherit; background: var(--field); border: 1px solid var(--line);
+  border-radius: var(--radius-s); transition: border-color .12s, background .12s; }
+select, button, input:not([type=checkbox]):not([type=range]):not([type=file]) { height: var(--ctl); }
+select, input { padding: 0 8px; }
+button { padding: 0 11px; cursor: pointer; font-weight: 500; white-space: nowrap; }
+button:hover:not(:disabled) { border-color: var(--accent); background: var(--sel); }
+button.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 600; }
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
 button:disabled { opacity: .45; cursor: default; }
+:is(button, select, input, textarea, summary, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input[type=checkbox], input[type=range] { accent-color: var(--accent); }
+input[type=range] { width: 96px; padding: 0; }
+textarea { width: 100%; min-height: 44px; padding: 7px 9px; resize: vertical; }
 label.inl { display: inline-flex; gap: 5px; align-items: center; }
-.small { font-size: 12.5px; color: var(--muted); }
+kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--raise);
+  color: var(--muted); font: 10.5px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+button.primary kbd { background: rgba(255, 255, 255, .18); color: inherit; border-color: transparent; }
+a { color: var(--accent); }
+.small { font-size: 11.5px; color: var(--muted); }
 .err { color: var(--no); }
+.card { background: var(--glass); backdrop-filter: blur(2px); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px;
+  box-shadow: var(--shadow); min-width: 0; }
+details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+
+/* ---------------- top bar ---------------- */
+header { flex: none; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 9px 14px;
+  background: var(--glass); backdrop-filter: blur(2px); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 14.5px; font-weight: 650; letter-spacing: -.01em; margin: 0 4px 0 0; white-space: nowrap; }
+header h1::before { content: ""; display: inline-block; width: 9px; height: 13px; margin-right: 8px; vertical-align: -1px;
+  border: 2.5px solid rgb(var(--frame)); border-radius: 1px; }      /* the yellow frame again, as a small mark */
+header label.inl { color: var(--muted); font-size: 12px; white-space: nowrap; min-width: 0; }
+header label.inl > :is(select, input) { color: var(--ink); font-size: 13px; }
+header a { white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } body::before, body::after { animation: none; } }
+
+/* ================= the public upload page ("Call Finder") ================= */
+:root { --side-w: clamp(360px, 28vw, 440px); }
+[hidden] { display: none !important; }                             /* the page hides its parts with the hidden attribute */
+header .sub { flex: 1; min-width: 200px; color: var(--muted); font-size: 12.5px; }
+header a { font-size: 12.5px; }
+.card h2 { margin: 0 0 8px; font-size: 14px; font-weight: 650; letter-spacing: -.005em; }
 .ok { color: var(--yes); }
-.row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
-#drop { border: 2px dashed var(--line); border-radius: 8px; padding: 18px 12px; text-align: center; margin: 8px 0; }
-#drop.over { border-color: var(--accent); background: var(--sel); }
-.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin-top: 6px; }
-.bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
-.linkbox { display: flex; gap: 6px; margin-top: 6px; }
-.linkbox input { flex: 1; min-width: 0; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
-#uploads .u { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 8px 0; border-top: 1px solid var(--line); }
-#uploads .u:first-child { border-top: 0; }
-#uploads .u.cur { background: var(--sel); margin: 0 -14px; padding: 8px 14px; }
-#uploads .name { font-weight: 600; overflow-wrap: anywhere; }
-#uploads .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; align-items: start; }
-.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
-.lanes { display: flex; flex-wrap: wrap; gap: 4px 12px; }
-.lanes label { display: inline-flex; gap: 4px; align-items: center; font-size: 13.5px; }
-#specwrap { position: relative; margin-top: 8px; touch-action: manipulation; }
-#cv { display: block; width: 100%; height: 320px; border-radius: 4px; background: #fff; cursor: crosshair; }
-@media (max-width: 640px) { #cv { height: 240px; } }
-#specmsg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; color: var(--muted); }
-table.list { width: 100%; border-collapse: collapse; font-size: 13.5px; }
-table.list td { padding: 4px 6px; border-top: 1px solid var(--line); }
-table.list tr { cursor: pointer; }
-table.list tr:hover, table.list tr.cur { background: var(--sel); }
-#boxlist { max-height: 220px; overflow-y: auto; margin-top: 8px; }
-table.top { width: 100%; border-collapse: collapse; }
-table.top td { padding: 4px 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
-table.top td.k { width: 20px; color: var(--muted); }
+.empty { color: var(--muted); padding: 6px 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
 .cn { color: var(--muted); }
-.score { display: inline-block; height: 8px; background: var(--accent); border-radius: 2px; vertical-align: middle; }
-.tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; border: 1px solid var(--line); }
+.tag { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; border: 1px solid var(--line); white-space: nowrap; }
 .tag.yes { color: var(--yes); border-color: var(--yes); }
 .tag.no { color: var(--no); border-color: var(--no); }
 .tag.unknown { color: var(--unk); border-color: var(--unk); }
-details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 6px; }
-.empty { color: var(--muted); padding: 6px 0; }
+.bar { height: 6px; margin-top: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }      /* progress */
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+
+/* nothing open, or a narrow window: one centred column in the page's old order (upload, your uploads, the recording,
+   the open box). The side column's two parts take their places in it */
+main { flex: 1; min-height: 0; overflow-y: auto; display: grid; gap: 12px; padding: 12px; align-content: start;
+  justify-content: center; grid-template-columns: minmax(0, 1100px); }
+main:not(:has(#viewer:not([hidden]))) { grid-template-columns: minmax(0, 720px); padding-top: max(12px, 6vh); }
+#paneSide { display: contents; }
+#paneUp { order: 1; display: grid; gap: 12px; align-content: start; min-width: 0; container-type: inline-size; }
+#viewer { order: 2; }
+#boxcard { order: 3; }
+
+/* upload */
+#drop { margin: 10px 0; padding: 22px 12px; text-align: center; border: 1.5px dashed var(--line); border-radius: var(--radius);
+  background: var(--raise); transition: border-color .12s, background .12s; }
+#drop.over { border-color: var(--accent); background: var(--sel); }
+main:not(:has(#viewer:not([hidden]))) #drop { padding: 38px 12px; }
+#addcard label.inl { display: flex; gap: 8px; line-height: 1.5; }
+#addstat:empty { display: none; }
+.linkbox { display: flex; gap: 6px; margin-top: 6px; }
+.linkbox input { flex: 1; min-width: 0; font: 12px ui-monospace, Menlo, Consolas, monospace; }
+
+/* your uploads */
+#uploads .u { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; align-items: center; padding: 9px 14px; margin: 0 -14px;
+  border-top: 1px solid var(--line); }
+#uploads .u:first-child { border-top: 0; }
+#uploads .u.cur { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
+#uploads .name { font-weight: 600; overflow-wrap: anywhere; }
+#uploads .acts { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+#uploads .acts button { height: 26px; padding: 0 9px; font-size: 12px; }
+@container (max-width: 420px) {
+  #uploads .u { grid-template-columns: minmax(0, 1fr); }
+  #uploads .acts { justify-content: flex-start; }
+}
+
+/* the open recording */
+.vhead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+.vhead h2 { margin: 0; overflow-wrap: anywhere; }
+.vhead .minnav { display: flex; gap: 6px; align-items: center; margin-left: auto; }
+.vhead .minnav button { padding: 0 9px; }
+.lanes { display: flex; flex-wrap: wrap; gap: 2px 6px; margin: 8px -6px 0 !important; }
+.lanes label { display: inline-flex; gap: 6px; align-items: center; padding: 3px 6px; border-radius: 6px; cursor: pointer; font-size: 12.5px;
+  user-select: none; }
+.lanes label:hover { background: var(--sel); }
+.lanes label input { margin: 0; }
+.lanes label:not(:has(input:checked)) { color: var(--muted); }
+.lanes label:not(:has(input:checked)) .sw { opacity: .4; }
+#specwrap { position: relative; margin-top: 8px; touch-action: manipulation; }
+#cv { display: block; width: 100%; height: 320px; border-radius: var(--radius-s); background: #fff; cursor: crosshair; }
+#specmsg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; color: #6b6b66; }
+.tools { display: flex; flex-wrap: wrap; margin-top: 8px; border: 1px solid var(--line); border-radius: var(--radius-s); background: var(--raise); }
+.tools > div { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-height: 40px; padding: 6px 14px 6px 78px; }
+.tools > div::before { content: attr(data-name); position: absolute; left: 12px; top: 13px; font-size: 10.5px; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.tools > div + div { border-left: 1px solid var(--line); }
+.tools select, .tools button { height: 26px; }
+.tools label.inl { color: var(--muted); font-size: 12px; }
+.tools label.inl > :is(select, input) { color: var(--ink); }
+#hint { margin-top: 8px !important; }
+#boxlist { max-height: 220px; overflow-y: auto; margin-top: 8px; }
+#boxlist:has(table) { border: 1px solid var(--line); border-radius: var(--radius-s); }
+table.list { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+table.list td { padding: 6px 10px; border-top: 1px solid var(--line); }
+table.list tr:first-child td { border-top: 0; }
+table.list tr { cursor: pointer; }
+table.list tr:hover, table.list tr.cur { background: var(--sel); }
+table.list tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+/* the open box */
+#btitle { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; font-variant-numeric: tabular-nums; }
+#boxcard .row button { height: 34px; }
+#boxcard b { font-weight: 600; }
+table.top { width: 100%; border-collapse: collapse; margin-top: 4px; }
+table.top td { padding: 5px 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.top td.k { width: 20px; color: var(--muted); }
+table.top td[style*="110px"] { white-space: nowrap; }
+table.top button.pw { height: 24px; padding: 0 7px; font-size: 11.5px; }
+.score { display: inline-block; height: 5px; background: var(--accent); border-radius: 3px; vertical-align: middle; }
+details summary { margin-top: 8px; }
+#flagtxt { height: 52px; }
+
+@media (max-width: 640px) {
+  #cv { height: 240px; }
+  .tools > div { flex: 1 1 100%; }                         /* the two control groups one under the other */
+  .tools > div + div { border-left: 0; border-top: 1px solid var(--line); }
+  table.list td { padding: 6px; }
+}
+
+/* a recording open in a wide window: the page fills the window. The recording takes the width; beside it one column
+   with the open box, then the upload cards. Each column scrolls by itself */
+@media (min-width: 1100px) {
+  main:has(#viewer:not([hidden])) { grid-template-columns: minmax(0, 1fr) var(--side-w); grid-template-rows: minmax(0, 1fr);
+    justify-content: stretch; align-content: stretch; overflow: hidden; }
+  main:has(#viewer:not([hidden])) #viewer { order: 0; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+  main:has(#viewer:not([hidden])) #viewer > * { flex: none; }
+  main:has(#viewer:not([hidden])) #specwrap { flex: 1; min-height: max(240px, 34vh); }
+  main:has(#viewer:not([hidden])) #cv { position: absolute; inset: 0; height: 100%; }
+  main:has(#viewer:not([hidden])) #boxlist { max-height: min(220px, 24vh); }
+  main:has(#viewer:not([hidden])) #paneSide { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto;
+    padding-right: 2px; }
+  main:has(#viewer:not([hidden])) #paneSide > * { flex: none; }
+  main:has(#viewer:not([hidden])) #boxcard { order: 0; }                 /* the open box first, the upload cards under it */
+}
+/* narrower windows: the page scrolls as a whole, one part under the other, as before */
+@media (max-width: 1099px) {
+  html, body { height: auto; }
+  body { display: block; overflow: auto; }
+  main { overflow: visible; padding-bottom: 40px; }
+}
 </style>
 </head>
 <body>
@@ -82,63 +207,75 @@ details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-
   <a href="review/" title="for invited reviewers (sign-in)">reviewers</a>
 </header>
 <main>
-  <section class="card" id="addcard">
-    <h2>Upload a recording</h2>
-    <div class="small" id="limits">…</div>
-    <div id="drop">
-      <div><button class="primary" id="pick">choose a file…</button> <span class="small">or drop it here</span></div>
-      <input type="file" id="file" accept="audio/*,.wav,.flac,.ogg,.mp3,.aif,.aiff" hidden>
-    </div>
-    <label class="inl small" style="align-items:flex-start"><input type="checkbox" id="agree" style="margin-top:3px">
-      <span>I may share this recording. It stays on this server only while this page is open: it is deleted when I close
-        the page, or after <span class="quietmin">10</span> minutes without contact (for example if my computer sleeps).
-        No one else can see it, and it is not used to train the models.</span></label>
-    <div id="addstat" class="small" style="margin-top:8px"></div>
-    <div class="bar" id="upbar" hidden><i></i></div>
-    <div id="newlink" hidden>
-      <div class="small" style="margin-top:8px">Your private link: keep it to come back to this upload from another browser or device.</div>
-      <div class="linkbox"><input id="newlinkv" readonly><button data-copy="newlinkv">copy</button></div>
-    </div>
-  </section>
-
-  <section class="card">
-    <h2>Your uploads</h2>
-    <div id="uploads"><div class="empty">…</div></div>
-    <div class="small" style="margin-top:6px">Your uploads are kept only while this page is open (reloading it keeps them).
-      When you close it they are deleted, and so are they after <span class="quietmin">10</span> minutes without contact.</div>
-  </section>
-
+  <!-- the open recording: one minute at a time -->
   <section class="card" id="viewer" hidden>
-    <h2 id="vtitle"></h2>
-    <div class="row">
-      <button id="prevMin" title="previous minute ([)">◀</button>
-      <select id="minute" title="minute of the recording"></select>
-      <button id="nextMin" title="next minute (])">▶</button>
-      <button id="playView" title="play this minute, all frequencies (P)">▶ play minute</button>
-      <label class="inl small">contrast <input type="range" id="contrast" min="0" max="100" value="50" style="width:90px"></label>
-      <label class="inl small">colours <select id="cmap"><option>grey</option><option>viridis</option><option>magma</option></select></label>
+    <div class="vhead">
+      <h2 id="vtitle"></h2>
+      <span class="minnav">
+        <button id="prevMin" title="previous minute ([)">◀</button>
+        <select id="minute" title="minute of the recording"></select>
+        <button id="nextMin" title="next minute (])">▶</button>
+      </span>
     </div>
     <div class="lanes" id="lanes" style="margin-top:8px"></div>
     <div id="specwrap"><canvas id="cv"></canvas><div id="specmsg"></div></div>
+    <div class="tools">
+      <div data-name="Sound">
+        <button id="playView" title="play this minute, all frequencies (P)">▶ play minute</button>
+      </div>
+      <div data-name="Display">
+        <label class="inl small">contrast <input type="range" id="contrast" min="0" max="100" value="50" style="width:90px"></label>
+        <label class="inl small">colours <select id="cmap"><option>grey</option><option>viridis</option><option>magma</option></select></label>
+      </div>
+    </div>
     <div class="small" id="hint" style="margin-top:4px">Each box is a stretch where a model scored a group above its threshold. Click a box for the model's top 5 names.</div>
     <div id="boxlist"></div>
   </section>
-
-  <section class="card" id="boxcard" hidden>
-    <h2 id="btitle"></h2>
-    <div id="binfo" class="small"></div>
-    <div class="row" style="margin-top:8px">
-      <button id="playBox" class="primary" title="the box's frequency band only (space)">▶ play call</button>
-      <button id="playOrig" title="every frequency">▶ original sound</button>
+  <!-- beside it: the open box, then uploading and this visitor's uploads. With nothing open, and in a
+       narrow window, the style sheet shows the upload cards first, as the page did before -->
+  <aside id="paneSide">
+    <section class="card" id="boxcard" hidden>
+      <h2 id="btitle"></h2>
+      <div id="binfo" class="small"></div>
+      <div class="row" style="margin-top:8px">
+        <button id="playBox" class="primary" title="the box's frequency band only (space)">▶ play call</button>
+        <button id="playOrig" title="every frequency">▶ original sound</button>
+      </div>
+      <div style="margin-top:10px"><b>Model's top 5</b> <span class="small" id="scorename"></span></div>
+      <div id="topwrap"></div>
+      <details id="allwrap" hidden><summary>Perch's top 5 over all its classes (if the group looks wrong)</summary><div id="topall"></div></details>
+      <div style="margin-top:12px" id="flagwrap">
+        <textarea id="flagtxt" rows="2" maxlength="500" placeholder="optional: what is wrong? (e.g. it is a car, not a bird)"></textarea>
+        <div class="row" style="margin-top:6px"><button id="flag">this looks wrong</button><span id="flagstat" class="small"></span></div>
+      </div>
+    </section>
+    <div id="paneUp">
+      <section class="card" id="addcard">
+        <h2>Upload a recording</h2>
+        <div class="small" id="limits">…</div>
+        <div id="drop">
+          <div><button class="primary" id="pick">choose a file…</button> <span class="small">or drop it here</span></div>
+          <input type="file" id="file" accept="audio/*,.wav,.flac,.ogg,.mp3,.aif,.aiff" hidden>
+        </div>
+        <label class="inl small" style="align-items:flex-start"><input type="checkbox" id="agree" style="margin-top:3px">
+          <span>I may share this recording. It stays on this server only while this page is open: it is deleted when I close
+            the page, or after <span class="quietmin">10</span> minutes without contact (for example if my computer sleeps).
+            No one else can see it, and it is not used to train the models.</span></label>
+        <div id="addstat" class="small" style="margin-top:8px"></div>
+        <div class="bar" id="upbar" hidden><i></i></div>
+        <div id="newlink" hidden>
+          <div class="small" style="margin-top:8px">Your private link: keep it to come back to this upload from another browser or device.</div>
+          <div class="linkbox"><input id="newlinkv" readonly><button data-copy="newlinkv">copy</button></div>
+        </div>
+      </section>
+      <section class="card">
+        <h2>Your uploads</h2>
+        <div id="uploads"><div class="empty">…</div></div>
+        <div class="small" style="margin-top:6px">Your uploads are kept only while this page is open (reloading it keeps them).
+          When you close it they are deleted, and so are they after <span class="quietmin">10</span> minutes without contact.</div>
+      </section>
     </div>
-    <div style="margin-top:10px"><b>Model's top 5</b> <span class="small" id="scorename"></span></div>
-    <div id="topwrap"></div>
-    <details id="allwrap" hidden><summary>Perch's top 5 over all its classes (if the group looks wrong)</summary><div id="topall"></div></details>
-    <div style="margin-top:12px" id="flagwrap">
-      <textarea id="flagtxt" rows="2" maxlength="500" placeholder="optional: what is wrong? (e.g. it is a car, not a bird)"></textarea>
-      <div class="row" style="margin-top:6px"><button id="flag">this looks wrong</button><span id="flagstat" class="small"></span></div>
-    </div>
-  </section>
+  </aside>
 </main>
 <audio id="au" preload="none"></audio>
 <script>
@@ -606,6 +743,9 @@ document.addEventListener("keydown", e => {
   else return;
   e.preventDefault();
 });
+
+// the canvas changes size without a window resize (the panel beside it opens and closes): redraw at the new size
+new ResizeObserver(() => draw()).observe(cv);
 
 // ---------------- start ----------------
 (async () => {

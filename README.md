@@ -17,9 +17,19 @@ analysis iterates cheaply.
 
 ### The review platform at a glance
 
+![Reviewer page in its three-panel layout: the groups and the minute's boxes on the left, the spectrogram and its controls in the middle, the answer and the model's top 5 on the right](docs/figures/review_app_layout.png)
+
+*The reviewer page as it looks now (2026-11-25), on the website, with the login name blanked. Minute 3
+of S01634_20250228_012000 with the box Birds #15 open (127.5–140.0 s). Left: the groups shown and the
+13 boxes of that minute. Middle: the spectrogram, the strip with the whole recording, and the Sound /
+View / Display controls. Right: the answer panel and, under it, the model's top 5 with the learned
+names first (*Mixornis gularis* 0.477, *Surniculus lugubris* 0.329). The layout is described in
+[New layout of the three pages](#new-layout-of-the-three-pages-2026-11-24-and-2026-11-25). The two
+pictures below show the same page in its earlier layouts.*
+
 ![Review app in minute view: one minute of S01634_20250228_012000 with an Aves box open, its learned species names, the zero-shot top 5 and the Yes / No / Unknown panel](docs/figures/review_app_minute.png)
 
-*`scripts/review_app.py` as it runs now (2026-11-18), with the refitted learners loaded. Minute
+*`scripts/review_app.py` in its earlier layout (2026-11-18), with the refitted learners loaded. Minute
 view of one minute of S01634_20250228_012000: the list on the left holds only the boxes of that
 minute, from every lane and source. The open box is Aves #15 (127.5–140.0 s). The taxon head gives
 it p = 0.989 and the box refiner's edges have confidence 0.90. Above Perch's zero-shot top 5, the
@@ -1294,7 +1304,7 @@ change. Mammalia stays on the review page, since its removal was not asked for.
   - a new reviewer box of the new group, with the answer, species and box;
   - **No** on the model box, with the comment "the call is Aves: logged as new box `<id>`".
 - On a new box, a Raven box or one of your boxes, the buttons set its group, as the drop-down did.
-- A group you log a box in is ticked in the header if it was not already, so the box stays listed.
+- A group you log a box in is ticked among the group ticks if it was not already, so the box stays listed.
 
 `review_labels.py` reads the two rows like any others. The model box is a negative for its own
 group, and the new box is a positive for the new group. `review_species` ignores the No row, which
@@ -1328,7 +1338,8 @@ image file). Its glow brightens and fades over 9 s; the animation stops under
 `prefers-reduced-motion`, and the frame takes no clicks. In dark mode the cards and header are 84%
 opaque so the frame shows faintly through them. The spectrogram canvas stays opaque. Checked by a
 headless Chrome screenshot on the scratch copy: the frame's top edge shows behind the header and its
-sides through the control panels, and the spectrogram is unaffected.
+sides through the control panels, and the spectrogram is unaffected. Since 2026-11-24 the frame runs
+along the window's edge instead (see [New layout of the three pages](#new-layout-of-the-three-pages-2026-11-24-and-2026-11-25)).
 
 **Taxon head boxes back (2026-11-22).** After the cleanup, bird detection looked much weaker on the
 added audio. The cause was the list, not the models. The cleanup fixed the list to model and reviewer
@@ -1392,6 +1403,109 @@ buttons and their note, the question, the title (e.g. "Insects → Birds"), the 
 | Total | 29 checks, all pass |
 
 A screenshot of the changed box shows the same names in the ticks, list, title and buttons.
+
+### New layout of the three pages (2026-11-24 and 2026-11-25)
+
+The reviewer page (24 Nov), the audio editor and the public upload page (25 Nov) have a new layout and
+look. Nothing was removed. Every control, key and message of the other sections is still there under
+the same element id, and the pages' scripts are unchanged apart from the few lines listed below. Where
+another section says where a control sits ("in the header", "under the spectrogram"), this section
+gives its place now.
+
+**Shared look.** The three pages use the same colours in light and dark mode
+(`prefers-color-scheme`), the same controls, the same panels and a top bar with the page's name. The
+yellow frame of 2026-11-21 now runs along the window's edge: a thin line, and a soft glow behind the
+panels, which are slightly see-through. It still brightens and fades over 9 s, stops under
+`prefers-reduced-motion` and takes no clicks. Each page fills the window and its panels scroll by
+themselves. In a narrow window the page scrolls as a whole, one part under the other, as before.
+
+**Reviewer page** (`review_app.html`, the first picture of this README): three panels.
+- **Top bar:** the recording list, add audio…, export Raven table and upload audio ↗ on the left; the
+  reviewer name and sign out on the right.
+- **Left:** "Groups shown" (the group ticks with their thresholds, then κ), the boxes of the open
+  minute, and the log's row count at the bottom. A new ☰ button beside the title hides this panel to
+  give the spectrogram its width; the choice is remembered in the browser.
+- **Middle:** the title and the minute buttons in one row, then the spectrogram, which takes the
+  height the window has, the overview strip, and one block of controls in three named rows (Sound,
+  View, Display). The notes come under the block: the box-drawing hint, the minute hint, the play note
+  and the display note.
+- **Right:** "Your answer" (the Group row, the question, Yes / No / Unknown, the box, the comment,
+  Accept, the history and the keys), or the audit window when one is open. Under it the model's top 5
+  and the species field.
+- **1100 px wide or less:** one scrolling column: list, spectrogram, answer.
+- **Script:** 8 lines added for the ☰ button (`showList`).
+
+**Audio editor** (`review_editor.html`): one panel.
+
+![Audio editor: one minute of a recording with a stretch selected, the waveform strip under it, and the controls in four groups](docs/figures/audio_editor.png)
+
+*The audio editor with minute 3 of S01634_20250228_012000 open and 9.8 s selected.*
+
+- **Top bar:** open file… and record on the left; save as, the format, save WAV, detect calls and
+  back to box review on the right.
+- **Panel:** a line with what is open on the left and what detect calls is doing on the right; the
+  spectrogram, which takes the height the window has; the strip; the controls in four named groups
+  (Sound and Edit, View and Display), two beside two when the panel is wider than 1050 px; a
+  status line with the last message on the left and the selection or cursor on the right; then the
+  display note, the note on where the file goes, and "How it works". "How it works" now opens as a
+  card over the page, so the spectrogram keeps its size.
+- **900 px wide or less:** the page scrolls as a whole and the spectrogram is 380 px high, as before.
+- **Script:** unchanged.
+
+**Upload page** (`public_app.html`).
+
+![Upload page: a recording open with its boxes, the open box's top 5 beside it](docs/figures/call_finder.png)
+
+*The upload page with a recording and one of its boxes open. The picture was taken on the website
+with test data: three recordings that reviewers had added, shown as a visitor holding their private
+links would see them (see Tests below).*
+
+- **Nothing open:** the upload card and "Your uploads" in one centred column.
+- **A recording open, window 1100 px or wider:** the page fills the window. The recording takes the
+  width: its title and the minute buttons in one row, the group ticks, the spectrogram, the Sound and
+  Display controls, and the box list. Beside it is one column with the open box (title, play buttons,
+  top 5, "this looks wrong") and, under the box, the two upload cards.
+- **Narrower:** one scrolling column in the earlier order: upload, your uploads, the recording, the
+  open box.
+- **How it switches:** the style sheet reads what the page shows (`main:has(#viewer:not([hidden]))`).
+  A browser without `:has()` keeps the single column.
+- **Script:** 1 line added. A `ResizeObserver` redraws the spectrogram when its size on the page
+  changes, which the two-column layout can do without a window resize.
+
+**Spectrogram size on the page** (px, measured in headless Chrome):
+
+| Window | Reviewer page | Audio editor (before → now) | Upload page, 6 boxes listed (before → now) |
+|---|---|---|---|
+| 1280 × 720 | 641 × 288 | 1211 × 380 → 1226 × 312 | 1038 × 320 → 854 × 278 |
+| 1512 × 850 | 784 × 375 | 1458 × 380 → 1458 × 473 | 1038 × 320 → 1023 × 392 |
+| 1920 × 1000 | 1182 × 615 | 1546 × 380 → 1866 × 623 | 1038 × 320 → 1414 × 568 |
+
+Before, the editor and the upload page scrolled as a whole and their spectrograms had a fixed height.
+Now the whole page is in view, so in a 720 px high window the spectrogram is smaller than it was, and
+in larger windows it is bigger.
+
+**Tests.** Headless Chrome over CDP on the website's address, with each new page given to the test
+browser only, before it went on the site. Every request that would change something on the site
+(everything but a GET, apart from the sign-in) was answered inside the test browser and never sent.
+The upload page shows a
+visitor only their own uploads, so its data was a stand-in: its read requests were answered from the
+reviewer side's data for three uploads already on the site, reshaped as the public side sends them.
+The build, check and test scripts are kept with the site's hosting notes, not in this repo.
+
+| Test | Result |
+|---|---|
+| Elements: every element of the page before, by tag, attributes and own text | reviewer page 191, audio editor 95, upload page 71: none missing or altered. Three wrappers dropped on purpose (`#right`, `.grid2`, the row that held the upload page's minute buttons); one inline style moved to the style sheet (`#specwrap`) |
+| Scripts | the earlier scripts byte for byte, plus the 8 lines (reviewer page) and the 1 line (upload page) named above |
+| Reviewer page, 24 Nov, 1512 × 850 | 26 state checks pass (answer keys, species, group change, Accept, new box, minute and box keys, view and display controls, History and Keys, the audit panel); a 12-step series of clicks and keys; click a box, then hover: never black, at two window sizes; ☰ hides the list (spectrogram 784 → 1053 px wide), repaints and is remembered after a reload |
+| Audio editor, 25 Nov (`test_editor.mjs`) | 54 / 54 at 1512 × 850 and at 1280 × 720, 53 / 53 at 820 × 800: empty page, open a WAV, readout, select by drag, move an edge, click, Ctrl+C / X / V / Z / Y / A, Delete, Esc, every edit and view button, the strip, the wheel, the kHz limit, the display controls, Space, play at ½×, "How it works", the drop sign, save as 16-bit (the file's size checked), record (a tone made in the page stood in for the microphone), detect calls (the upload and the scan answered in the browser), the window resized twice, and the page as a visitor gets it |
+| Upload page, 25 Nov (`test_public.mjs`) | 40 / 40 at 1512 × 850 and at 1280 × 720, 39 / 39 at 900 × 800: first visit, upload refused without the tick, upload followed through the queue and the scan until the recording opens by itself, minute buttons, list and `[`, group ticks, colours and contrast, play minute and P, a box opened from the spectrogram and from the list, play call / original sound / a top-5 window, "this looks wrong" (offered on a linked upload only), copy link, open another upload, delete, and the window set to 1280 × 720, 1000 × 800 and 390 × 844 with a recording and a box open |
+| Every control reachable (editor and upload page) | in the main states (nothing open, a file or recording open, a box open) and at each window size, every shown button, list, field and link has a size and nothing covers its middle; nothing sticks out of the window sideways |
+| JS exceptions | none |
+
+Not tested: Safari, Firefox and touch screens; a real Accept, upload, delete or flag on the server
+(the scripts behind them are unchanged, only their layout was tried); a browser without `:has()` or
+container queries; the earlier `ui_*.mjs` tests of these pages, which were not rerun on the new
+layout.
 
 ## Audio editor: open, record, cut and save audio
 
