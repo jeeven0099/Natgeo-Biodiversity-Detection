@@ -2,6 +2,7 @@
 
     python -X utf8 scripts/weekly_train.py                      # the server's weekly run (natgeo-train.timer)
     python -X utf8 scripts/weekly_train.py --no-swap            # fit and report, leave the live files alone
+    python -X utf8 scripts/weekly_train.py --rebaseline         # once: replace live fits trained on the test set
 
 Steps, one learner at a time (memory: the app keeps running beside this):
   1. lock      data/review/weekly/.lock (pid + time); a lock older than 24 h, or whose process is gone
@@ -14,8 +15,19 @@ Steps, one learner at a time (memory: the app keeps running beside this):
                (--cache data/review/refine_cache) and review_calibrate.py (a report only: the app does not
                read it), each with --out data/review/weekly/<stamp>/run/<learner> and --uploads-dir, so
                uploads count as well as the survey recordings (review_sources.py). Output goes to
-               run/<learner>.log; seconds, return code and peak memory go into the report.
-  4. swap      taxon, species and refiner only, and only when the new fit
+               run/<learner>.log; seconds, return code and peak memory go into the report. The learners
+               leave out the frozen test recordings (config/frozen_test.csv; review_labels.py).
+  4. score     when data/review/frozen_test/ holds a snapshot (frozen_test.py freeze): frozen_test.py score
+               --fit live=calibration --fit new=run, into <stamp>/frozen_test/ (log <stamp>/frozen_test.log),
+               its scores.txt appended to the report. Report only: it never decides a swap, and a failed
+               score is exit 1 but swaps still go ahead.
+  5. swap      taxon, species and refiner only. Never a fit whose spec's held_out marker is not
+               config/frozen_test.csv's (it may have trained on the frozen recordings); a live fit
+               whose marker is not that list's is kept, with the reason, until a --rebaseline run.
+               --rebaseline (once, after the frozen test set is set up): every new fit is swapped in
+               when its own adopted units have their interval low end above 0, without the live checks
+               below; a unit the new fit does not adopt falls back to zero-shot in the app.
+               Otherwise only when the new fit
                  - adopts every group (taxon, refiner) or the learner (species) that the live fit adopts,
                  - has at least the live support there: taxon pos and recordings per adopted group,
                    species n_rows and n_recordings, refiner n_boxes and n_recordings per adopted group,
@@ -25,7 +37,7 @@ Steps, one learner at a time (memory: the app keeps running beside this):
                regression is for the user to look at, never applied on its own.
                A swap copies the live files to data/review/calibration_history/<stamp>/<learner>/ and
                moves the new ones in (tmp + os.replace, the json last).
-  5. report    data/review/weekly/<stamp>/report.json + report.txt; data/review/weekly/restart-app is
+  6. report    data/review/weekly/<stamp>/report.json + report.txt; data/review/weekly/restart-app is
                written when something was swapped (the service restarts callfinder on it, since the app
                reads the learners only at start).
 Older runs past --keep (default 12) are removed from weekly/ and calibration_history/.
@@ -44,6 +56,8 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+import frozen_test as FT                                 # stdlib only at import (scripts/ is sys.path[0])
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -224,12 +238,30 @@ def _units(name: str, spec: dict) -> dict:
     return out
 
 
-def swap_decision(name: str, live: dict | None, new: dict) -> tuple[str, list[str]]:
-    """('swap' | 'same' | 'keep', reasons)."""
+def swap_decision(name: str, live: dict | None, new: dict, held_sha: str | None = None,
+                  rebaseline: bool = False) -> tuple[str, list[str]]:
+    """('swap' | 'same' | 'keep', reasons). held_sha: frozen_test.marker()'s sha256 of
+    config/frozen_test.csv (None: no list); a fit is comparable only when its spec's held_out marker
+    is that one. rebaseline: the live fit was trained on other recordings (the frozen ones), so the
+    live adoption and support checks are skipped once; the new fit's own checks still hold."""
+    if FT.marker_sha(new) != held_sha:
+        return "keep", [f"the new fit's held_out marker {FT.marker_sha(new)} is not config/frozen_test.csv's "
+                        f"{held_sha}: it may have trained on the frozen test recordings"]
     if live is None:
         return "swap", ["no live file"]
     L, N = _units(name, live), _units(name, new)
     reasons = []
+    if rebaseline:
+        reasons = [f"{u}: adopted with interval low end {ci}, not above 0" for u, (a, _, _, ci) in N.items()
+                   if a and name != "refiner" and not (ci is not None and ci > 0)]
+        if reasons:
+            return "keep", reasons
+        lost = [u for u, (a, *_) in L.items() if a and not N.get(u, (False,))[0]]
+        return "swap", ["rebaseline: live replaced by the fit without the frozen test recordings"] + (
+            [f"no longer adopted (zero-shot from now on): {', '.join(lost)}"] if lost else [])
+    if FT.marker_sha(live) != held_sha:
+        return "keep", ["the live fit trained on the frozen test recordings (its held_out marker is not "
+                        "config/frozen_test.csv's): run weekly_train.py --rebaseline once"]
     for u, (adopted, sup, _, _) in L.items():
         if not adopted:
             continue
@@ -291,7 +323,8 @@ def prune(folder: Path, keep: int) -> list[str]:
 # ---------------------------------------------------------------- main
 
 def report_text(rep: dict) -> str:
-    out = [f"weekly training {rep['stamp']} (UTC), swap {'on' if rep['swap'] else 'off'}", ""]
+    out = [f"weekly training {rep['stamp']} (UTC), swap {'on' if rep['swap'] else 'off'}"
+           + (", REBASELINE" if rep.get("rebaseline") else ""), ""]
     for n, s in (rep["snapshot"] or {}).items():
         out.append(f"  {n}: " + ("absent" if s is None else
                                  f"{s['rows']} rows, {s['dropped']} dropped, {s['partial_bytes']} partial bytes"))
@@ -305,6 +338,12 @@ def report_text(rep: dict) -> str:
             out.append(f"    {why}")
     out += ["", f"swapped: {', '.join(rep['swapped']) or 'nothing'}; restart flag: {rep['restart_flag']}",
             f"pruned: {rep['pruned']}", ""]
+    ft = rep.get("frozen_test")
+    if ft is not None:
+        out.append(f"frozen test score (report only; live = before this run's swap): rc {ft['returncode']}, "
+                   f"{ft['seconds']} s, peak {ft['peak_mb']} MB")
+        txt = Path(ft["out"]) / "scores.txt"
+        out += [txt.read_text(encoding="utf-8") if txt.exists() else "  no scores.txt: see frozen_test.log", ""]
     return "\n".join(out)
 
 
@@ -314,6 +353,9 @@ def main() -> int:
     ap.add_argument("--uploads-dir", type=Path, default=UPLOADS_DIR, help="audio added in the app")
     ap.add_argument("--learners", nargs="+", choices=list(LEARNERS), default=list(LEARNERS))
     ap.add_argument("--no-swap", action="store_true", help="fit and report only")
+    ap.add_argument("--rebaseline", action="store_true",
+                    help="once, after the frozen test set is set up: swap in every valid new fit without "
+                         "comparing it to the live one (which trained on the frozen recordings)")
     ap.add_argument("--keep", type=int, default=KEEP, help=f"weekly runs and history kept (default {KEEP})")
     ap.add_argument("--python", default=sys.executable)
     args = ap.parse_args()
@@ -328,20 +370,34 @@ def main() -> int:
         base = weekly / stamp
         logs, run = base / "logs", base / "run"
         run.mkdir(parents=True, exist_ok=True)
-        rep = {"stamp": stamp, "swap": not args.no_swap, "review_dir": str(review),
+        rep = {"stamp": stamp, "swap": not args.no_swap, "rebaseline": args.rebaseline, "review_dir": str(review),
                "uploads_dir": str(args.uploads_dir.resolve()), "snapshot": snapshot(review, logs),
                "learners": {}, "swapped": [], "restart_flag": False, "pruned": {}}
         print(f"snapshot -> {logs}")
         failed = False
-        for name in args.learners:
+        held_sha = (FT.marker() or {}).get("sha256")
+        for name in args.learners:                        # 3. fit
             out = run / name
             cmd = learner_cmd(name, args.python, logs, out, review, args.uploads_dir.resolve())
             print(f"{name}: running ({run / (name + '.log')})", flush=True)
             r = run_measured(cmd, run / f"{name}.log", ROOT)
             rep["learners"][name] = r
             r["left_out"] = [ln.strip() for ln in (run / f"{name}.log").read_text(encoding="utf-8").splitlines()
-                             if ln.startswith("left out")]     # e.g. new survey boxes with no audio on the server
+                             if ln.startswith(("left out", "held out"))]   # e.g. survey boxes with no audio here
             print(f"  rc {r['returncode']}, {r['seconds']} s, peak {r['peak_mb']} MB", flush=True)
+        fits = [n for n in args.learners if n in SPEC and rep["learners"][n]["returncode"] == 0]
+        if (review / FT.SNAP / "manifest.json").exists() and fits:   # 4. frozen test score (report only)
+            cmd = [args.python, "-X", "utf8", str(SCRIPTS / "frozen_test.py"), "score", "--review-dir", str(review),
+                   "--uploads-dir", str(args.uploads_dir.resolve()), "--fit", f"live={cal}", "--fit", f"new={run}",
+                   "--learners", *fits, "--out", str(base / "frozen_test")]
+            print(f"frozen test: scoring ({base / 'frozen_test.log'})", flush=True)
+            ft = run_measured(cmd, base / "frozen_test.log", ROOT)
+            ft["out"] = str(base / "frozen_test")
+            rep["frozen_test"] = ft
+            print(f"  rc {ft['returncode']}, {ft['seconds']} s, peak {ft['peak_mb']} MB", flush=True)
+            failed |= ft["returncode"] != 0               # a failed score is reported; it never blocks a swap
+        for name in args.learners:                        # 5. swap
+            out, r = run / name, rep["learners"][name]
             if r["returncode"] != 0:
                 failed = True
                 r["result"] = "failed: live files kept"
@@ -354,7 +410,7 @@ def main() -> int:
                 failed = True
                 r["result"] = f"failed: no {SPEC[name]} written; live files kept"
                 continue
-            decision, reasons = swap_decision(name, live, new)
+            decision, reasons = swap_decision(name, live, new, held_sha, args.rebaseline)
             r.update(adopted_live=adopted(name, live), adopted_new=adopted(name, new), reasons=reasons)
             if decision == "swap" and not args.no_swap:
                 r["files"] = swap_in(name, out, cal, hist_root / stamp)
@@ -364,7 +420,7 @@ def main() -> int:
                 r["result"] = "would swap (--no-swap)"
             else:
                 r["result"] = {"same": "no swap: nothing new", "keep": "kept live: see reasons"}[decision]
-            print(f"  {r['result']}", flush=True)
+            print(f"{name}: {r['result']}", flush=True)
         if rep["swapped"]:
             (weekly / RESTART_FLAG).write_text(stamp + "\n", encoding="utf-8")
             rep["restart_flag"] = True

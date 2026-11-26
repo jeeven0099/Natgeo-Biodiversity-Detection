@@ -109,6 +109,7 @@ sections below.
 - [Box refiner](#box-refiner-edges-on-the-fine-spectrogram-fitted-to-the-reviewers-boxes)
 - [Learners 2 and 3: taxon head and learned species names](#learners-2-and-3-taxon-head-and-learned-species-names)
 - [Weekly training](#weekly-training-weekly_trainpy)
+- [Frozen held-out test set](#frozen-held-out-test-set-frozen_testpy)
 - [Common names for the top 5](#common-names-for-the-top-5)
 - [Why the class index exists](#why-the-class-index-exists)
 - [GPU setup (Windows)](#gpu-setup-windows)
@@ -1276,7 +1277,10 @@ change a box's group directly.
 - the "Reset to" buttons, plus the "box edited" note that went with them;
 - the line under the title ("model box … max score … tightened … refiner confidence …") and the
   "refiner: refined boxes for …" line in the header;
-- the survey's own recordings, unless the app runs with `--survey`. Added audio is always listed.
+- the survey's own recordings, unless the app runs with `--survey`. Added audio is always listed;
+- since 2026-11-25, the 34 frozen test recordings (`config/frozen_test.csv`, read at start), even
+  with `--survey`, so they get no new reviews
+  ([Frozen held-out test set](#frozen-held-out-test-set-frozen_testpy)).
 
 The public page, the server's items and every learner keep all lanes and sources. `LOG_COLS` did not
 change. Mammalia stays on the review page, since its removal was not asked for.
@@ -2031,6 +2035,12 @@ Insecta, because EarthChirp's library holds only Orthoptera and Cicadidae.
 **Tables.** Every row carries `split` from `data/splits.csv` (the 26 recordings outside it get
 `""`), so a learner can hold out whole recordings, and `audit_window` (the complete window of its
 group it overlaps, if any), which marks the set that recall can be measured on.
+
+**Frozen test recordings** (since 2026-11-25). The rows of the 34 recordings in
+`config/frozen_test.csv` are left out of every table, whenever they were logged, and the run prints a
+`held out (frozen test set …)` line. `labels_from_logs` returns the list's marker (`held_out`) and
+the rows it left out, and every learner writes that marker into its spec. `--include-test` keeps
+the rows. See [Frozen held-out test set](#frozen-held-out-test-set-frozen_testpy).
 
 | File | One row per | Main columns |
 |---|---|---|
@@ -2965,16 +2975,20 @@ takes `--uploads-dir`.
    half-written last line and drops rows whose field count differs from the header's, so the app can
    keep logging during the run.
 3. **Fit.** Each learner runs in turn into `weekly/<stamp>/run/`, with its log beside it. Time and
-   peak memory are recorded.
-4. **Swap.** Each learner's new spec is compared with the live spec (the rule below):
+   peak memory are recorded. The learners leave out the frozen test recordings (next section).
+4. **Frozen test score.** When `data/review/frozen_test/` holds a snapshot, `frozen_test.py score`
+   scores the live fit and the new fit on it, into `weekly/<stamp>/frozen_test/`. Its `scores.txt`
+   goes into the report. This is report only: it never decides a swap. A failed score makes the
+   exit code 1, but the swaps still go ahead.
+5. **Swap.** Each learner's new spec is compared with the live spec (the rule below):
    - When it passes, the live files go to `calibration_history/<stamp>/<learner>/` and the new ones
      replace them, each through a temporary file and `os.replace`, with the JSON last.
    - A learner that failed keeps its live files.
    - `review_calibrate.py` is report only, since the app does not read it.
-5. **Restart flag.** When anything was swapped, the run writes `weekly/restart-app`. The unit's
+6. **Restart flag.** When anything was swapped, the run writes `weekly/restart-app`. The unit's
    `ExecStopPost` removes the flag and restarts `callfinder`, because the app reads the learners only
    at start.
-6. **Report.** `weekly/<stamp>/report.txt` and `report.json`. The last 12 runs and the last 12
+7. **Report.** `weekly/<stamp>/report.txt` and `report.json`. The last 12 runs and the last 12
    history folders are kept. Exit 0 when every learner ran, 1 when one failed.
 
 **Swap rule.** A unit is a taxon group, the species learner, or a refiner group. A refit is swapped
@@ -2990,6 +3004,19 @@ in only when:
 
 Identical counts and decisions mean "nothing new" (no swap). A missing live file means swap.
 Otherwise the run keeps the live files and writes the reasons into the report.
+
+**Held-out marker.** Every learner's spec carries `held_out`: the list file, the number of
+recordings and the sha256 of `config/frozen_test.csv` that its labels left out.
+
+- A new fit whose marker is not the current list's is never swapped in, since it may have trained
+  on the frozen recordings.
+- A live fit whose marker is not the list's is kept, with the reason "run weekly_train.py
+  --rebaseline once".
+- `--rebaseline` (once, after the frozen test set is set up) skips the comparison with the live
+  fit: leaving the test recordings out lowers support, so the live checks would always keep the old
+  fit. Each new fit goes in when its own adopted units have their CI low end above 0. A unit the new
+  fit does not adopt falls back to zero-shot in the app, and the report names it. From the next run
+  on, the normal rule compares against this new baseline.
 
 **Memory and time** (one run each on the real logs, 6,919 log rows; peak = the learner's process
 tree):
@@ -3052,7 +3079,15 @@ scripts that write a prepared spec):
 | Memory | a peak above 1 MB for every learner |
 | `--no-swap` | exit 0, "would swap"; live files and flag untouched |
 | Held lock | exit 2; no new run folder |
-| Total | 12 checks, all pass |
+| No frozen snapshot | no score step |
+| New fit with no `held_out` marker (2026-11-25) | kept, the reason names the marker |
+| Live fit with no marker, new fit with 500 fewer Aves positives | kept, the reason asks for `--rebaseline` |
+| `--rebaseline`, same fit with Insecta no longer adopted | swapped; "no longer adopted (zero-shot from now on): Insecta" in the reasons |
+| `--rebaseline`, refiner with Anthropogenic dropped | swapped |
+| Score step (stand-in `frozen_test.py`) | run with `--fit live=calibration --fit new=run` and the three learners; its `scores.txt` in the report; the header says REBASELINE |
+| `--rebaseline`, Weather adopted at CI low −0.01 | kept |
+| Score step fails (exit 4) | run exit 1; the swaps still decided |
+| Total | 20 checks, all pass (the 30 unit checks still pass) |
 
 **Real logs, scratch review dir** (2026-11-23, laptop, swap on; the live `data\review\calibration\`
 was not touched):
@@ -3094,6 +3129,126 @@ species 286 MB). The species log shows whether Perch was loaded for uncached box
 checked here. The taxon peak sits 75 MB under the timer unit's `MemoryHigh=1500M`; above it the fit
 is slowed, not stopped. systemd's own "Memory peak: 256.0K" for the transient unit does not match
 these figures and is not used.
+
+## Frozen held-out test set (`frozen_test.py`)
+
+Since 2026-11-25, 34 recordings are kept out of training for good, so the learners can be scored on
+reviews they have never seen. The learners' own scores are cross-validated over the recordings they
+train on; this set is a second, fixed check on top of that.
+
+```
+.venv-perch\Scripts\python.exe -X utf8 scripts\frozen_test.py freeze      # once, where the authoritative log is (the server)
+.venv-perch\Scripts\python.exe -X utf8 scripts\frozen_test.py score       # the live learners
+.venv-perch\Scripts\python.exe -X utf8 scripts\frozen_test.py score --fit live=data\review\calibration --fit new=data\review\weekly\<stamp>\run
+```
+
+**The recordings.** `config/frozen_test.csv` lists the 34 recordings of the test split in
+`data/splits.csv`. Everything else follows from that list:
+
+- **Training.** `review_labels.labels_from_logs` leaves out every row of these recordings, whenever
+  it was logged, for all four learners. Each learner writes the list's marker (`held_out`: the file,
+  34, its sha256) into its spec. Weekly training swaps in only fits with that marker (see
+  [Weekly training](#weekly-training-weekly_trainpy)).
+- **Reviewing.** The reviewer page does not list these recordings. Reviews of them logged later stay
+  in the log, but neither training nor this test uses them until a `freeze --refresh`.
+- **Not covered:** an upload that is a byte copy of a test recording under another name would count
+  as a new recording. Uploads are matched by name only.
+
+**`freeze`** copies the rows of these recordings in `annotation_log.csv` and `audit_windows.csv`,
+and the `box_shown.csv` and `species_shown.csv` rows of those log rows (by `log_id`), into
+`data/review/frozen_test/`. The folder is gitignored, since the rows hold reviewer names.
+
+- The copy is cut after the last complete line, and rows whose field count is not the header's are
+  dropped, as in the weekly snapshot.
+- `manifest.json` records the time, the list and its sha256, the rows kept and the sha256 of each
+  file, and the last `logged_at`.
+- `freeze` refuses when a snapshot exists. `--refresh` writes a new one and moves the old one to
+  `frozen_test_history/<stamp>/`.
+
+**`score`** rebuilds the labels from the snapshot by the same rules, and scores each fit
+(`--fit LABEL=DIR`, with the learner files in `DIR` or `DIR/<learner>/`) as the app would use it:
+
+| Learner | Score | Rows |
+|---|---|---|
+| Taxon | AUROC positive vs rest; P vs N where "no" segments exist | the 2.5 s segments of the test recordings, as `review_taxon.group_data` builds them. The app's score is the head probability when the group is adopted, else zero-shot |
+| Species | MRR@5, hit@1, hit@5 of the named name in the list the app shows (learned names ≥ tau when adopted, then the logged zero-shot top 5) | rows where the reviewer saw no learned name |
+| Refiner | mean IoU with the accepted box, of what the app shows (refined when the group is adopted and confident, else the grid box) | boxes shown plain |
+
+- Each score comes with a 95% bootstrap interval over the test recordings (2,000 draws, seed 0):
+  app minus zero-shot for each fit, and each later fit minus the first on the same rows (paired).
+  A group with one recording has no interval, and the report says so.
+- A fit whose marker is not the snapshot's is flagged "TRAINED ON THE FROZEN RECORDINGS".
+- Output: `scores.txt`, `scores.json` and the per-row CSVs, in `data/review/frozen_test_scores/<stamp>/`
+  by default. Missing box embeddings and refined boxes are computed and added to the caches, as the
+  learners do.
+- **Report only.** Nothing here adopts or swaps. Adoption stays on each learner's cross-validation
+  over the training recordings.
+
+**First held-out result** (2026-11-25, laptop, scratch copy of the laptop's logs: 6,919 rows, of
+which 1,119 are on the 34 recordings, all 34 reviewed). "live" is the current fit, which trained on
+these recordings, so its score is not held-out; "new" is the refit without them:
+
+| Learner | Zero-shot | live (trained on them) | new (held out) | new − live |
+|---|---|---|---|---|
+| Taxon Aves (2,739 positive segments, 20 recordings) | 0.774 | 0.964 | 0.930, gain [+0.070, +0.226] | −0.034 [−0.048, −0.020] |
+| Taxon Insecta (11,641, 34 recordings) | 0.637 | 0.969 | 0.915, gain [+0.166, +0.395] | −0.055 [−0.099, −0.023] |
+| Taxon Anthropogenic (1,753, 8 recordings) | 0.870 | 0.987 | 0.974, gain [+0.067, +0.136] | −0.013 [−0.033, −0.004] |
+| Taxon Amphibia (2, 1 recording) | 0.958 | 0.997 | 0.888 (no interval) | −0.109 |
+| Taxon Mammalia (22, 1 recording) | 0.801 | not adopted | not adopted | 0 |
+| Species MRR@5 (444 rows, 34 recordings) | 0.469 | 0.921 | 0.891, gain [+0.255, +0.680] | −0.030 [−0.085, +0.002] |
+| Refiner IoU, all plain boxes (92, 25 recordings) | grid 0.211 | 0.296 | 0.220 (5% refined), gain [+0.000, +0.021] | −0.076 [−0.131, −0.035] |
+
+- On reviews it has never seen, the taxon head beats zero-shot on Aves, Insecta and Anthropogenic,
+  and the learned names beat the zero-shot top 5, all with intervals above 0. The live fit's higher
+  scores are what training on these recordings adds.
+- **The refiner gains almost nothing held-out.** The refit adopts Aves only (live: Aves,
+  Anthropogenic and `all`), and it refines 8% of the plain Aves boxes (IoU 0.202 → 0.215).
+- **Mammalia:** all 6 Mammalia positives of the laptop log are on test recordings, so the learners
+  have none to train on, and the refit's species MRR on the 6 Mammalia rows is 0. Amphibia has 2
+  test positives on one recording, too few to read.
+
+**Server steps** (once, in this order, as the app user in `/srv/natgeo`):
+
+1. `git pull`, then `freeze`. It must run on the server, whose log is the authoritative one.
+2. `weekly_train.py --rebaseline` (beside the app, with the timer unit's limits). It refits without
+   the 34 recordings, scores live and new, and swaps the new fits in. Units the refit does not adopt
+   fall back to zero-shot; the report names them.
+3. Restart `callfinder`, so the app reads the new learners and hides the 34 recordings.
+
+From the next weekly run on, the normal swap rule compares against the rebaselined fits, and the
+report carries the frozen-set scores of live and new.
+
+### Tests
+
+**Freeze and the label hold-out** (`t_frozen.py`, scratch copy of `data\review`):
+
+| Check | Result |
+|---|---|
+| List | the 34 test-split recordings of `data/splits.csv`; the marker's sha256 does not depend on order; no file → `[]`, marker `None` |
+| `read_rows` | a quoted newline kept; a short row and a 2-byte partial tail dropped |
+| `freeze` | rc 0; the log rows are the source rows of the 34 recordings, in order, field for field (1,119 of 6,919); `box_shown` 1,119 of 7,004 and `species_shown` 4 of 215, by `log_id`; no audit file → `None` |
+| Manifest | the list's sha256 and recordings; 34 with rows; last `logged_at` 2026-11-17T13:23:46; row counts; the file's sha256 |
+| Sources | the logs untouched |
+| Second `freeze` | refused, snapshot unchanged |
+| `--refresh` | a new snapshot; the old one in `frozen_test_history/`, named in `previous`; no `.partial` left |
+| Hold-out | no frozen recording in any of the five label kinds; every other recording's rows identical row for row to the run without it; marker plus 1,119 log rows; `frozen=` overrides the list |
+| CLI | the `held out` line printed; `--include-test` keeps the rows |
+| Total | 23 checks, all pass |
+
+**Reviewer page** (`t_frozen_app.py`: the app on the scratch copy with `--survey`, then again with
+the frozen list emptied in-process):
+
+| Check | Result |
+|---|---|
+| Without the list | all 34 listed among 134 |
+| As shipped | none of the 34; the 100 listed are exactly the other list minus the 34, in order |
+| Total | 3 checks, all pass |
+
+**Weekly run on the scratch copy** (`weekly_train.py --no-swap`, laptop, survey audio,
+`data\uploads` read only): all rc 0. Each learner printed its held-out line (1,119 log rows) and kept
+live, with the reason asking for `--rebaseline`. The score step ran in 59 s at a peak of 924 MB
+(taxon fit 773 s / 890 MB, species 125 s / 276 MB, refiner 25 s / 236 MB, calibrate 13 s / 304 MB).
+The scores are in the table above.
 
 ## Common names for the top 5
 

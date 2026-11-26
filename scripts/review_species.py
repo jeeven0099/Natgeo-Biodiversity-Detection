@@ -379,7 +379,7 @@ def main() -> int:
                                                                "zero", "canonical", "rank"]), X)
     spec, P, ev_df, tau_df = fit(D, mins, args.boot, args.seed)
     spec = dict(version=dt.datetime.now().isoformat(timespec="seconds"), **spec, log=str(args.log),
-                added_recordings=len(src.uploads), left_out_boxes=n_out[0] if n_out else 0)
+                added_recordings=len(src.uploads), left_out_boxes=n_out[0] if n_out else 0, held_out=lab["held_out"])
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "species.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
     np.save(args.out / "species_protos.npy", P.astype(np.float32))

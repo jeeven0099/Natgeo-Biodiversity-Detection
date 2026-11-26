@@ -38,7 +38,9 @@ boxes merged into one Raven box (same accepted box) give that box's taxon and sp
 Nothing here guesses a label: an unboxed stretch is a negative only inside a complete audit window;
 Raven gaps and unreviewed boxes are never negatives. Every row carries the recording's split from
 data/splits.csv ("" for the 26 recordings outside it and for audio added in the app), so learners
-can hold out whole recordings.
+can hold out whole recordings. The frozen test recordings (config/frozen_test.csv, scripts/frozen_test.py)
+are left out entirely, whenever their rows were logged (--include-test keeps them), so no learner
+trains on them.
 
 Recordings (review_sources.py, --uploads-dir): the survey's (the long-form caches, dataset/) and the
 scanned audio added in the app (data/uploads). Rows of any other recording are left out: a deleted
@@ -55,6 +57,7 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import frozen_test as FT  # noqa: E402
 import insecta_compare as IC  # noqa: E402
 import raven_match as RM  # noqa: E402
 import review_app as R  # noqa: E402
@@ -377,12 +380,16 @@ def in_window(windows: dict, rec: str, group: str, a: float, b: float) -> str:
 
 
 def labels_from_logs(log_rows: list[dict], audit_rows: list[dict], shown_rows=(),
-                     species_shown_rows=(), sources: SRC.Sources | None = None) -> dict[str, list[dict]]:
+                     species_shown_rows=(), sources: SRC.Sources | None = None, holdout: bool = True,
+                     frozen: list[str] | None = None) -> dict:
     """build() with the splits, the names tables and each audited recording's Nyquist;
     shown_rows: box_shown.csv rows; species_shown_rows: species_shown.csv rows.
     sources (review_sources.Sources; default: the survey + data/uploads): rows of recordings it does
     not know are left out (a deleted or unscanned upload, a name both an upload and a survey
-    recording have). Added recordings have no split (""): the learners hold out whole recordings."""
+    recording have). Added recordings have no split (""): the learners hold out whole recordings.
+    holdout: rows of the frozen test recordings (frozen, default config/frozen_test.csv) are left
+    out, whenever they were logged; out["held_out"] is frozen_test.marker() of those recordings
+    plus the rows left out (None when holdout is off or the list is empty)."""
     src = sources if sources is not None else SRC.Sources()
     splits = {r["session_id"]: r["split"] for r in read_csv_rows(SPLITS_FILE)}
     known = src.known()
@@ -392,13 +399,24 @@ def labels_from_logs(log_rows: list[dict], audit_rows: list[dict], shown_rows=()
     if len(log_rows) < n_log or len(audit_rows) < n_audit:
         print(f"left out (no known recording: a deleted or unscanned upload): {n_log - len(log_rows)} log rows, "
               f"{n_audit - len(audit_rows)} audit rows", flush=True)
+    held = None
+    test = sorted(set(FT.recordings() if frozen is None else frozen)) if holdout else []
+    if test:
+        keep, n_log, n_audit = set(test), len(log_rows), len(audit_rows)
+        log_rows = [r for r in log_rows if r["recording"] not in keep]
+        audit_rows = [r for r in audit_rows if r["recording"] not in keep]
+        held = dict(FT.marker(test), log_rows=n_log - len(log_rows), audit_rows=n_audit - len(audit_rows))
+        print(f"held out (frozen test set, {held['list']}, {held['n_recordings']} recordings): "
+              f"{held['log_rows']} log rows, {held['audit_rows']} audit rows", flush=True)
     top_khz = {}
     for r in {r["recording"] for r in audit_rows}:
         k = src.nyquist_khz(r)
         if k is not None:
             top_khz[r] = k
-    return build(log_rows, audit_rows, splits, Names(), top_khz, {r["log_id"]: r["shown_box"] for r in shown_rows},
-                 {r["log_id"]: r["learned_shown"] for r in species_shown_rows})
+    out = build(log_rows, audit_rows, splits, Names(), top_khz, {r["log_id"]: r["shown_box"] for r in shown_rows},
+                {r["log_id"]: r["learned_shown"] for r in species_shown_rows})
+    out["held_out"] = held
+    return out
 
 
 def main() -> int:
@@ -409,11 +427,18 @@ def main() -> int:
     ap.add_argument("--species-shown", type=Path, default=R.SPECIES_SHOWN_FILE)
     ap.add_argument("--out", type=Path, default=OUT_DIR)
     ap.add_argument("--uploads-dir", type=Path, default=SRC.SA.UPLOADS_DIR, help="audio added in the app")
+    ap.add_argument("--include-test", action="store_true",
+                    help="keep the rows of the frozen test recordings (config/frozen_test.csv); default: left out")
     args = ap.parse_args()
     log_rows, audit_rows = read_csv_rows(args.log), read_csv_rows(args.audit)
     src = SRC.Sources(args.uploads_dir)
     print(src.describe())
-    out = labels_from_logs(log_rows, audit_rows, read_csv_rows(args.shown), read_csv_rows(args.species_shown), src)
+    out = labels_from_logs(log_rows, audit_rows, read_csv_rows(args.shown), read_csv_rows(args.species_shown), src,
+                           holdout=not args.include_test)
+    if not args.include_test:
+        drop = set(FT.recordings())
+        log_rows = [r for r in log_rows if r["recording"] not in drop]
+        audit_rows = [r for r in audit_rows if r["recording"] not in drop]
     args.out.mkdir(parents=True, exist_ok=True)
     for key, cols in (("box", BOX_COLS), ("taxon", TAXON_COLS), ("species", SPECIES_COLS),
                       ("audit", AUDIT_LABEL_COLS), ("withheld", WITHHELD_COLS)):

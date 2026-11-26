@@ -119,6 +119,7 @@ import review_species as RS  # noqa: E402
 import review_taxon as RT  # noqa: E402
 import raven_match as RM  # noqa: E402
 import scan_audio as SA  # noqa: E402
+import frozen_test as FT  # noqa: E402
 
 ROOT = pv.ROOT
 PDIR = ROOT / "data" / "perch_windows"
@@ -130,6 +131,7 @@ SHOWN_FILE = REVIEW_DIR / "box_shown.csv"
 SPECIES_SHOWN_FILE = REVIEW_DIR / "species_shown.csv"
 HTML_FILE = Path(__file__).resolve().parent / "review_app.html"
 COMMON_FILE = ROOT / "config" / "common_names.csv"
+FROZEN_TEST = frozenset(FT.recordings())   # the frozen test recordings: not listed on the reviewer page
 APP_VERSION = "5"            # 2: queue sources, reviewer boxes, audit windows; 3: box refiner, box_shown.csv;
                              # 4: species learner (species_shown.csv), taxon check source;
                              # 5: website (--public): reviewer name from the proxy's login, visitor flags
@@ -1671,8 +1673,10 @@ class Handler(BaseHTTPRequestHandler):
             for bid, r in latest.items():
                 done[r["recording"]] = done.get(r["recording"], 0) + 1
             lanes = [g for g in S.lanes if g not in REVIEW_HIDDEN_LANES]
-            # added audio only, unless the app runs with --survey (the survey's own recordings)
-            recs = [r for r in list(S.recs) if (self.survey or r in S.added) and r not in S.guest_of]
+            # added audio only, unless the app runs with --survey (the survey's own recordings); never the
+            # frozen test recordings (config/frozen_test.csv, read at start): no new reviews of them
+            recs = [r for r in list(S.recs) if (self.survey or r in S.added) and r not in S.guest_of
+                    and r not in FROZEN_TEST]
             self.json({"recordings": [{"id": r, "counts": S.box_counts[r], "reviewed": done.get(r, 0),
                                        "added": S.added.get(r), **S.rec_info(r)} for r in recs],
                        "can_add": S.can_add and S._uploads_on, "uploads_dir": rel(UPLOADS_DIR),

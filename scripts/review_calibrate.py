@@ -401,7 +401,7 @@ def main() -> int:
            "box_settings": {r.lane: {"kappa": r.fitted_kappa, "row_support": r.fitted_row_support}
                             for r in bset.itertuples() if r.decision == "adopt"},
            "threshold_objective": "positive vs unlabelled: recall - flagged share",
-           "minimum_support": mins, "log": str(args.log)}
+           "minimum_support": mins, "log": str(args.log), "held_out": lab["held_out"]}
     (args.out / "calibration.json").write_text(json.dumps(rec, indent=2), encoding="utf-8")
 
     print(f"{len(lab['taxon'])} taxon labels, {len(box)} yes boxes ({len(pipeline_boxes(box))} pipeline)")

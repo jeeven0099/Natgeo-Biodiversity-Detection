@@ -538,7 +538,7 @@ def main() -> int:
                 features="mean of L2-normalised Perch window embeddings over the segment, L2-normalised; "
                          "+ the default lane's zero-shot score (logit for Perch lanes)",
                 cs=list(CS), cap=args.cap, outer_folds=OUTER_FOLDS, inner_folds=INNER_FOLDS, minimum_support=mins,
-                log=str(args.log), added_recordings=len(src.uploads), groups=spec_groups)
+                log=str(args.log), added_recordings=len(src.uploads), groups=spec_groups, held_out=lab["held_out"])
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "taxon.json").write_text(json.dumps(spec, indent=2, default=float), encoding="utf-8")
     np.savez(args.out / "taxon.npz", **{f"{g}__{k}": v for g, p in params.items() for k, v in p.items()})

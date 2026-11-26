@@ -603,7 +603,7 @@ def main() -> int:
                                CONTROL_SHARE=CONTROL_SHARE, P_WIN=P_WIN, MIN_SHOWN=MIN_SHOWN,
                                EDGE_TOL=list(EDGE_TOL), NESTED_EXTRA=NESTED_EXTRA),
                 minimum_support=mins, groups=entries, log=str(args.log), added_recordings=len(src.uploads),
-                left_out_boxes=int((~here).sum()))
+                left_out_boxes=int((~here).sum()), held_out=lab["held_out"])
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "refiner.json").write_text(json.dumps(spec, indent=2), encoding="utf-8")
     sets.to_csv(args.out / "refine_settings.csv", index=False)
