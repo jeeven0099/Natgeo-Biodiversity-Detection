@@ -21,7 +21,12 @@ The review queue of a recording mixes five sources (the page has a checkbox for 
   taxon check   only for groups review_taxon.py adopted (the checkbox is hidden otherwise): runs of
                 2.5 s segments where the taxon head's probability is >= its cut and no model box of the
                 group covers the segment, on the group's default lane, tightened like model boxes;
-                logged with model "taxon head". Model boxes of an adopted group also carry the head's
+                logged with model "taxon head". Answered time is never asked again: a lane's answered
+                taxon-check spans are taken out of new runs (a refitted head's runs have other edges, so
+                the same time would come back under a new id), and every answered item is listed from
+                the log at its logged span. A recording uses the head that was live when it was added
+                (review_taxon.PinnedHeads, data/review/taxon_versions/; the survey's: the first), so a
+                retrained head proposes on new audio only. Model boxes of an adopted group also carry the head's
                 probability (taxon_p, the highest over the box's 2.5 s segments), and taxon_doubt when
                 it is below the cut (a tag on the page).
 Learners (data/review/calibration/, read at start; --no-learners runs on zero-shot only):
@@ -358,11 +363,12 @@ class Store:
     """Everything the app reads, loaded once."""
 
     def __init__(self, device: str, refiner: BR.Refiner | None = None, species: RS.SpeciesLearner | None = None,
-                 taxon: RT.TaxonHead | None = None):
+                 taxon: RT.TaxonHead | None = None, pins: RT.PinnedHeads | None = None):
         self.device = device
         self.refiner = refiner                 # None: no refined boxes, no uncertain queue
         self.species = species or RS.SpeciesLearner()   # suggests names only when adopted
         self.taxon_head = taxon or RT.TaxonHead()           # taxon check source only for adopted groups
+        self.pins = pins if pins is not None and pins.rows else None   # per recording: the head live when added
         self._ref: dict[tuple[str, float], dict] = {}
         self._ref_key = None                   # the (recording, kappa) the background refiner works on
         self.seg = pv.load_segments(PDIR)
@@ -403,7 +409,7 @@ class Store:
         # learners: the taxon head reads the cached window embeddings; the species learner pools Perch's
         # cells over the box (box_embed.py), from the windows the top 5 ran on or a run of its own
         if self.E is None:
-            self.taxon_head = RT.TaxonHead()
+            self.taxon_head, self.pins = RT.TaxonHead(), None
         self.twin = RT.Windows(self.E, self.win_rows, self.win_starts, self.seg_by_rec)
         self.embedder = BE.BoxEmbedder(
             run=lambda rec, st: self.perch_run(rec, st, ["spatial_embedding"])["spatial_embedding"],
@@ -959,6 +965,7 @@ class Store:
     def _model_items(self, rec: str, kappa: float, near: bool) -> list[dict]:
         """Model boxes at the listening thresholds; with near, the runs at the lower near_low cut
         that hold no segment at the threshold."""
+        head = self.head_of(rec)
         pb = pv.perch_boxes(self.seg_by_rec[rec], self.near_low if near else self.thresholds)
         if near:
             pb = pb[pb["max_prob"] < pb["group"].map(self.thresholds)]
@@ -974,10 +981,53 @@ class Store:
                                   np.asarray(b.kept, bool) if tight else None, b.max_prob, kappa,
                                   area=float(b.area) if tight else 1.0))
             g = lane_group(b.group)
-            if not near and g in self.taxon_head.groups:     # taxon check: the head doubts this model box
+            if not near and g in head.groups:                # taxon check: the head doubts this model box
                 d = out[-1]
-                p = self.taxon_head.span_prob(self.twin, g, rec, d["t_begin"], d["t_end"])
-                d["taxon_p"], d["taxon_doubt"] = round(p, 4), p < self.taxon_head.cut(g)
+                p = head.span_prob(self.twin, g, rec, d["t_begin"], d["t_end"])
+                d["taxon_p"], d["taxon_doubt"] = round(p, 4), p < head.cut(g)
+        return out
+
+    def head_of(self, rec: str) -> RT.TaxonHead:
+        """The taxon head a recording's taxon check uses: with pinned heads, the one live when the
+        recording was added (the survey's: the first), so a retrained head proposes on new audio only."""
+        if self.pins is None:
+            return self.taxon_head
+        return self.pins.head_for(self.added.get(rec, {}).get("added_at"))
+
+    def taxon_adopted(self) -> list[str]:
+        """Groups any head in use adopted (the taxon check source is listed when there is one)."""
+        heads = self.pins.heads() if self.pins is not None else [self.taxon_head]
+        return sorted({g for h in heads for g in h.adopted()})
+
+    def _answered_taxon_spans(self, rec: str) -> dict[str, list[tuple[float, float]]]:
+        """lane -> the spans of the recording's logged taxon-check items (any answer, unknown included),
+        first logged first."""
+        out: dict[str, list[tuple[float, float]]] = {}
+        seen = set()
+        for r in self.log_rows():
+            if r["recording"] == rec and r["model"] == TAXON_MODEL and row_id(r) not in seen:
+                seen.add(row_id(r))
+                out.setdefault(r["lane"], []).append((float(r["box_begin_s"]), float(r["box_end_s"])))
+        return out
+
+    def _taxon_boxes(self, rec: str, kappa: float, lane: str, rows: list[tuple]) -> list[dict]:
+        """Taxon-check items from (begin_s, end_s, max_prob, head p or None) rows, tightened like model boxes."""
+        if not rows:
+            return []
+        fb = pd.DataFrame([(lane, b0, b1, mp, round((b1 - b0) / pv.SEG_S), hp) for b0, b1, mp, hp in rows],
+                          columns=["group", "begin_s", "end_s", "max_prob", "n_segments", "head"])
+        if self.cells is not None:
+            fb = self.cells.tighten_boxes(rec, fb, kappa)
+        out = []
+        for b in fb.itertuples():
+            tight = self.cells is not None and np.isfinite(b.t_begin)
+            head = None if b.head is None or not np.isfinite(b.head) else float(b.head)
+            d = self._item(rec, "taxon", TAXON_MODEL, lane, b.begin_s, b.end_s,
+                           [b.t_begin, b.t_end, b.lo_khz, b.hi_khz] if tight else None,
+                           np.asarray(b.kept, bool) if tight else None, b.max_prob, kappa,
+                           label=f"p={head:.2f}" if head is not None else "", area=float(b.area) if tight else 1.0)
+            d["taxon_p"] = round(head, 4) if head is not None else None
+            out.append(d)
         return out
 
     def _taxon_items(self, rec: str, kappa: float) -> list[dict]:
@@ -985,33 +1035,41 @@ class Store:
         segments the head scores >= its cut and no model box of the group's lanes covers (calls the
         thresholds miss; model-box time is taken out of a run, not the run dropped, since a group
         like Aves can score high for most of a recording), on the group's default lane, tightened
-        like model boxes."""
+        like model boxes. The time of the lane's answered taxon-check items is taken out the same way,
+        so a refitted head, whose runs have other edges, never asks about answered time again; each
+        answered item is listed from the log (its logged span, any group, adopted or not), with the
+        recording's head's probability over it where the group is adopted. The head is head_of(rec):
+        with pinned heads, the one live when the recording was added."""
+        answered = self._answered_taxon_spans(rec)
+        head = self.head_of(rec)
         out = []
-        for g in self.taxon_head.adopted():
-            lane = self.taxon_head.lane(g)
+        for g in head.adopted():
+            lane = head.lane(g)
             if lane not in self.lanes or rec not in self.win_rows:
                 continue
-            st, sc, p = self.taxon_head.segments(self.twin, g, rec)
+            st, sc, p = head.segments(self.twin, g, rec)
             pb = pv.perch_boxes(self.seg_by_rec[rec], {x: self.thresholds[x] for x in self.lanes if lane_group(x) == g})
-            b0s, b1s = pb["begin_s"].to_numpy(float), pb["end_s"].to_numpy(float)
+            spans = ([(float(a), float(b)) for a, b in zip(pb["begin_s"], pb["end_s"])]
+                     + answered.get(lane, []))
+            b0s = np.array([a for a, _ in spans], float)
+            b1s = np.array([b for _, b in spans], float)
             covered = np.array([((b0s < a + pv.SEG_S - 1e-6) & (b1s > a + 1e-6)).any() for a in st], bool)
             rows = []
-            for i, j in RT.runs((p >= self.taxon_head.cut(g)) & ~covered):
-                b0, b1 = float(st[i]), float(st[j - 1] + pv.SEG_S)
-                rows.append((lane, b0, b1, float(np.nanmax(sc[i:j])), j - i, float(p[i:j].max())))
-            if not rows:
+            for i, j in RT.runs((p >= head.cut(g)) & ~covered):
+                rows.append((float(st[i]), float(st[j - 1] + pv.SEG_S), float(np.nanmax(sc[i:j])), float(p[i:j].max())))
+            out += self._taxon_boxes(rec, kappa, lane, rows)
+        latest = self.latest()
+        for lane, spans in answered.items():
+            if lane not in self.lanes:
                 continue
-            fb = pd.DataFrame(rows, columns=["group", "begin_s", "end_s", "max_prob", "n_segments", "head"])
-            if self.cells is not None:
-                fb = self.cells.tighten_boxes(rec, fb, kappa)
-            for b in fb.itertuples():
-                tight = self.cells is not None and np.isfinite(b.t_begin)
-                d = self._item(rec, "taxon", TAXON_MODEL, lane, b.begin_s, b.end_s,
-                               [b.t_begin, b.t_end, b.lo_khz, b.hi_khz] if tight else None,
-                               np.asarray(b.kept, bool) if tight else None, b.max_prob, kappa,
-                               label=f"p={b.head:.2f}", area=float(b.area) if tight else 1.0)
-                d["taxon_p"] = round(b.head, 4)
-                out.append(d)
+            g = lane_group(lane)
+            rows = []
+            for b0, b1 in spans:
+                r = latest[item_id(rec, TAXON_MODEL, lane, b0, b1)]
+                hp = (head.span_prob(self.twin, g, rec, b0, b1)
+                      if g in head.groups and rec in self.win_rows else None)
+                rows.append((b0, b1, score_or_none(r["box_max_score"]), hp))
+            out += self._taxon_boxes(rec, kappa, lane, rows)
         return out
 
     def raven_lanes(self, group: str) -> list[str]:
@@ -1691,13 +1749,15 @@ class Handler(BaseHTTPRequestHandler):
                        "has_cells": S.cells is not None, "row_edges_khz": pv.ROW_EDGES_KHZ,
                        "sources": {k: v for k, v in SOURCES.items()
                                    if (k != "uncertain" or S.refiner is not None)
-                                   and (k != "taxon" or S.taxon_head.adopted())},
+                                   and (k != "taxon" or S.taxon_adopted())},
                        "learners": {
                            "species": {"version": S.species.version, "adopted": S.species.adopted,
                                        "groups": S.species.groups(), "tau": S.species.spec.get("tau"),
                                        "n_prototypes": len(S.species.meta)},
                            "taxon": {"version": S.taxon_head.version, "adopted": S.taxon_head.adopted(),
-                                     "cut": {g: S.taxon_head.cut(g) for g in S.taxon_head.adopted()}}},
+                                     "cut": {g: S.taxon_head.cut(g) for g in S.taxon_head.adopted()},
+                                     "pinned": [{"version": r["version"], "live_since": r["live_since"]}
+                                                for r in (S.pins.rows if S.pins is not None else [])]}},
                        "default_sources": list(DEFAULT_SOURCES),
                        "refiner": None if S.refiner is None else {
                            "version": S.refiner.version, "adopted": S.refiner.adopted(),
@@ -2088,11 +2148,19 @@ def main() -> None:
     cal = REVIEW_DIR / "calibration"
     species = RS.SpeciesLearner() if args.no_learners else RS.SpeciesLearner.load(cal / "species.json")
     taxon = RT.TaxonHead() if args.no_learners else RT.TaxonHead.load(cal / "taxon.json")
+    pins = None
     if not args.no_learners:
         sp = f"adopted, {len(species.meta)} prototypes" if species.adopted else "not adopted"
         print(f"species learner: {sp}; taxon head: {', '.join(taxon.adopted()) or 'no group adopted'}", flush=True)
+        # a retrained head proposes on audio added from now on; earlier recordings keep the head they had
+        pins = RT.PinnedHeads(REVIEW_DIR / "taxon_versions")
+        if pins.register(cal):
+            print(f"taxon head {taxon.version} pinned: live from now", flush=True)
+        if pins.rows:
+            print(f"pinned taxon heads: {len(pins.rows)}; the survey's recordings use {pins.rows[0]['version']}",
+                  flush=True)
     print("loading scores, cell maps and the Raven tables ...", flush=True)
-    Handler.store = Store(args.device, refiner, species, taxon)
+    Handler.store = Store(args.device, refiner, species, taxon, pins)
     Handler.store.start_uploads(guests=args.public)
     Handler.survey = args.survey
     if args.public:

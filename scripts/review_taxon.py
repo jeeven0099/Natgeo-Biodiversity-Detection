@@ -82,6 +82,8 @@ BOOT, SEED = 2000, 0
 EVAL_COLS = ["recording", "group", "start_s", "label", "negative", "zero_shot", "head", "fold", "C"]
 ROW_COLS = ["recording", "start_s", "label", "negative", "zero_shot"]
 SEG_COLS = ["recording", "start_s", "group", "zero_shot", "head"]
+PIN_DIR = ROOT / "data" / "review" / "taxon_versions"   # every head the app served (PinnedHeads)
+PIN_COLS = ["version", "live_since", "folder"]
 
 
 def lane_group(lane: str) -> str:
@@ -461,6 +463,65 @@ class TaxonHead:
         return st, sc, (self.prob(group, X) if len(st) else np.zeros(0))
 
 
+class PinnedHeads:
+    """Every taxon head the app has served (user decision 2026-11-26: a retrained head proposes on new
+    audio only). PIN_DIR/live.csv lists each head's version and when it went live, and a numbered
+    folder per head keeps its taxon.json + taxon.npz (weekly_train.py's history pruning never touches
+    it). A recording uses the head that was live when it was added: the survey's recordings, and
+    audio added before the first head, use the first."""
+
+    def __init__(self, root: Path = None):
+        self.root = Path(root or PIN_DIR)
+        f = self.root / "live.csv"
+        self.rows = pd.read_csv(f, dtype=str, keep_default_na=False).to_dict("records") if f.exists() else []
+        self._heads: dict[str, TaxonHead] = {}
+
+    def register(self, spec_dir: Path, since: str | None = None) -> bool:
+        """Pins the head in spec_dir (taxon.json + taxon.npz) as live from `since` (ISO time; default now;
+        "start" = from the beginning, the first head only), unless it is the newest pinned head already.
+        -> whether a row was added."""
+        spec_dir = Path(spec_dir)
+        if not ((spec_dir / "taxon.json").exists() and (spec_dir / "taxon.npz").exists()):
+            return False
+        version = json.loads((spec_dir / "taxon.json").read_text(encoding="utf-8")).get("version", "")
+        if not version or (self.rows and self.rows[-1]["version"] == version):
+            return False
+        since = since or dt.datetime.now().isoformat(timespec="seconds")
+        if since == "start":
+            if self.rows:
+                raise ValueError("'start' is for the first pinned head only")
+            since = ""
+        elif self.rows and self.rows[-1]["live_since"] and since < self.rows[-1]["live_since"]:
+            raise ValueError(f"{since} is before the newest pinned head's {self.rows[-1]['live_since']}")
+        else:
+            dt.datetime.fromisoformat(since)          # a malformed time fails here, before anything is written
+        folder = f"{len(self.rows) + 1:03d}"
+        (self.root / folder).mkdir(parents=True, exist_ok=False)
+        for name in ("taxon.json", "taxon.npz"):
+            (self.root / folder / name).write_bytes((spec_dir / name).read_bytes())
+        self.rows.append(dict(version=version, live_since=since, folder=folder))
+        pd.DataFrame(self.rows, columns=PIN_COLS).to_csv(self.root / "live.csv", index=False)
+        return True
+
+    def head(self, row: dict) -> TaxonHead:
+        if row["folder"] not in self._heads:
+            self._heads[row["folder"]] = TaxonHead.load(self.root / row["folder"] / "taxon.json")
+        return self._heads[row["folder"]]
+
+    def head_for(self, added_at: str | None) -> TaxonHead:
+        """The head live when a recording was added (None: a survey recording -> the first)."""
+        if not self.rows:
+            return TaxonHead()
+        row = self.rows[0]
+        for r in self.rows[1:]:
+            if added_at and r["live_since"] <= added_at:
+                row = r
+        return self.head(row)
+
+    def heads(self) -> list[TaxonHead]:
+        return [self.head(r) for r in self.rows]
+
+
 def runs(on: np.ndarray) -> list[tuple[int, int]]:
     """(first, last + 1) of each run of True."""
     e = np.diff(np.r_[0, np.asarray(on, np.int8), 0])
@@ -485,7 +546,19 @@ def main() -> int:
     ap.add_argument("--positives-only", action="store_true",
                     help="ignore the 'no' answers (they fall back to unlabelled): the 2026-11-17 fit")
     ap.add_argument("--uploads-dir", type=Path, default=L.SRC.SA.UPLOADS_DIR, help="audio added in the app")
+    pin = ap.add_argument_group("pinned heads (no fit; review_app.py pins the head it starts with itself)")
+    pin.add_argument("--pin", type=Path, metavar="DIR", help="pin the head in DIR (taxon.json + taxon.npz) and exit")
+    pin.add_argument("--pin-since", metavar="ISO", help="when it went live (default now; 'start' for the first head)")
+    pin.add_argument("--pin-dir", type=Path, default=PIN_DIR, help=f"default {PIN_DIR}")
     args = ap.parse_args()
+    if args.pin is not None:
+        ph = PinnedHeads(args.pin_dir)
+        added = ph.register(args.pin, args.pin_since)
+        print(("pinned" if added else "not pinned (no head there, or it is the newest pinned head)")
+              + f"; {args.pin_dir / 'live.csv'}:")
+        for r in ph.rows:
+            print(f"  {r['folder']}  version {r['version']}  live since {r['live_since'] or 'the start'}")
+        return 0
     mins = {k: getattr(args, f"min_{k}") for k in MIN}
 
     src = L.SRC.Sources(args.uploads_dir)

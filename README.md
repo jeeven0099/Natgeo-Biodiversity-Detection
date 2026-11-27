@@ -732,7 +732,9 @@ only when a taxon head is adopted:
   group also carry the head's probability, and a **taxon doubt** tag when it is under the cut.
   Ticked alone, the list holds the finds (highest probability first), then the doubted model boxes
   (lowest first): the head's disagreements with the zero-shot threshold, which are what a review
-  settles. Runs merge like model-box runs, so a find can be long.
+  settles. Runs merge like model-box runs, so a find can be long. A recording keeps the head that
+  was live when it was added, so a retrained head proposes on new audio only, and answered finds
+  are never asked again (see [Taxon head](#taxon-head-review_taxonpy)).
 - **Audit windows.** Picked by `numpy.random.default_rng([20261116, crc32(recording)])` from the
   recording's non-overlapping 15 s slots, so they are the same on every start, and they are chosen
   without looking at any score or label.
@@ -2783,10 +2785,36 @@ head adds the whole Perch embedding.
 - **In the app** (adopted groups only): runs of segments ≥ the cut where no model box is become the
   "taxon check" source. A model box whose highest segment probability is under the cut gets a "taxon
   doubt" tag (see [the queue](#review-platform-yes--no--unknown-with-a-top-5-species-list)).
+- **A retrained head proposes on new audio only** (user decision 2026-11-26). Each recording keeps
+  the head that was live when it was added. The survey's recordings, and audio added before the
+  first pinned head, use the first one. So a refit changes no proposal on a recording already on the
+  site, and the app never re-proposes old audio.
+  - **Pinned heads:** `data\review\taxon_versions\live.csv` (version, live_since, folder) lists every
+    head the app has served, and a numbered folder per head keeps its `taxon.json` and `taxon.npz`.
+    `weekly_train.py`'s history pruning does not touch it.
+  - **At start**, the app pins the head in `calibration\` as live from that moment, unless it is
+    already the newest pinned head. The taxon check source and the doubt tags on a recording then
+    use `head_of(recording)`, and `/api/meta` lists the pinned heads.
+  - **Answered items stay listed:** a find's id is its run's span. Answered finds are listed from
+    the log at their logged span, and their time is taken out of new runs, so time that has been
+    answered is never asked about again under another id.
+  - **Only the taxon check is pinned.** Refined boxes and learned species names stay current on
+    every recording; both are computed when a box is opened.
+  - **Set up on the server** (2026-11-26): the 2026-11-19 head (`2026-11-19T10:34:09`) is pinned
+    from the start, and the rebaselined head (`2026-11-27T01:20:46`) from 2026-11-27 01:25:06 UTC,
+    when callfinder restarted with it. Run this before the app restarts on the new code, or the app
+    pins its current head as the first one, and the survey would use it.
+
+    ```
+    .venv-perch/bin/python -X utf8 scripts/review_taxon.py --pin data/review/calibration_history/20261127-010459/taxon --pin-since start
+    .venv-perch/bin/python -X utf8 scripts/review_taxon.py --pin data/review/calibration --pin-since 2026-11-27T01:25:06
+    ```
 
 Options: `--log`, `--out` (default `data\review\calibration\`), `--min-pos`, `--min-recordings`,
 `--cap`, `--boot`, `--seed`, `--groups` (fit only these; `taxon.json` then holds only these),
-`--no-segments`, `--positives-only`.
+`--no-segments`, `--positives-only`. Pinning (no fit; prints `live.csv` and exits): `--pin DIR`
+(the head in DIR), `--pin-since ISO` (default now; `start` for the first head only; a time before
+the newest pinned head's is refused), `--pin-dir` (default `data\review\taxon_versions\`).
 
 | File | What |
 |---|---|
@@ -2794,6 +2822,7 @@ Options: `--log`, `--out` (default `data\review\calibration\`), `--min-pos`, `--
 | `taxon.npz` | per group: scaler mean / scale, coefficients, intercept (keys `group__field`) |
 | `taxon_eval.csv` | every held-out segment: recording, group, start, label (1 positive), negative (1 = a `no` segment), zero-shot, head, fold, C |
 | `taxon_segments.csv` | every 2.5 s segment of the survey re-scored by the adopted heads (skip with `--no-segments`) |
+| `data\review\taxon_versions\` | pinned heads: `live.csv` (version, live_since, folder) and `001\`, `002\`, ... each with its `taxon.json` + `taxon.npz` (written by the app at start and by `--pin`) |
 
 ### Learned species names (`review_species.py`)
 
@@ -3051,6 +3080,27 @@ earlier outputs were backed up first): exit 0. Amphibia, Anthropogenic, Aves and
 `TaxonHead.load()` reads the adopted groups with their cuts and lanes (Insecta → EC-Insecta); its
 `segments` equal `taxon_segments.csv` on a real recording for all 4 groups. `annotation_log.csv`,
 `box_shown.csv`, `raven_plan.csv` and `species_shown.csv` are unchanged (sha256).
+
+**Pinned heads and answered finds** (2026-11-26, `test_reask.py` and `test_pins.py`, scratch
+scripts). The inputs were scratch copies of the server's log (7,114 rows), its live head
+(`2026-11-27T01:20:46`) and the head before it (`2026-11-19T10:34:09`). They ran on the 5 of the 9
+recordings with taxon-check answers that are on this laptop. Nothing was written to `data\review\`.
+
+| Check | Result |
+|---|---|
+| Answered finds after a refit (new head) | with the fix: 87 answered finds listed, each once, with its answer, plus 126 fresh ones, none overlapping answered time in the same lane. Without it (the same code with the answered spans emptied): 25 of the 87 answered finds dropped from the list, and 24 proposals over answered time |
+| Answered finds, old head | 87 listed + 102 fresh; every answered find the old code listed is still listed. Without the fix, 6 dropped and 3 re-asked |
+| Other sources | model, near, Raven, reviewer and audit items identical with and without the fix |
+| Answer, then rebuild | a fresh find answered `no` is listed exactly once after the list is rebuilt, with the same span and taxon p (0.4524); nothing else overlaps it |
+| `PinnedHeads` | empty → no head; a folder with no head → not pinned; first head with `start`; the same head again → not pinned; `start` for a second head, a malformed time and a time before the newest head refused, with nothing written; files byte-identical; `live.csv` read back |
+| Which head | not added (survey), added 2026-11-19 20:13:41 and 2026-11-27 01:25:05 → the 11-19 head; 01:25:06 and 2026-12-03 → the new one |
+| Store, 3 survey recordings | taxon items, taxon p and doubt tags equal the old head's (47, 20 and 25 taxon items) and differ from the new head's; other sources unchanged; the same recording marked added after the retrain gets the new head's, before it the old head's |
+| Source list | taxon check listed when any pinned head adopted a group; no pins → the live head |
+| CLI | `--pin old --pin-since start`, then `--pin new --pin-since 2026-11-27T01:25:06` → 2 rows; `--pin` with the newest head again → not pinned, 2 rows |
+| App on the pinned folder | start log "pinned taxon heads: 2; the survey's recordings use 2026-11-19T10:34:09"; no new pin; `/api/meta` lists both; `/api/boxes` on `S01634_20250228_012000` serves 20 taxon items, the old head's |
+| App with no pins yet | pins its head from the start time ("pinned: live from now"); `/api/meta` lists it |
+| Ruff | `review_app.py`, `review_taxon.py`: all checks passed |
+| Total | `test_reask.py` 11 / 11, `test_pins.py` 34 / 34, and the CLI, both app starts and ruff as above |
 
 ## Weekly training (`weekly_train.py`)
 
